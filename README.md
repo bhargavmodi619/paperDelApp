@@ -53,8 +53,18 @@ house, riding a street to its end. They assert behaviour, not pixels; they catch
 a module that stopped wiring up, they do not review the art.
 
 - `test/smoke.test.js` runs the ES modules in `src/`.
+- `test/bot.test.js` is the playability bot claude.md §6 asks for. It plays
+  levels 1–12 six times each and asserts the quota is always reachable, that
+  early levels barely scratch a good rider, and that no level averages more
+  than 1.5 crashes. This is the guard on "harder every level, but still
+  playable" — if it fails, the generator is making unfair streets. Its driving
+  logic lives in `test/bot-brain.js`.
 - `test/bundle.test.js` rebuilds and runs the generated `paper-round.html`, so
   the single-file output cannot drift away from the modules.
+
+The stubbed context also rejects non-finite draw coordinates. A NaN out of the
+projection maths draws nothing at all in a real browser and reads as broken
+art rather than as an error, so it is worth failing loudly on.
 
 Per [claude.md](claude.md) §6, visual work still has to be *looked at*. These
 tests do not replace rendering a frame and inspecting it.
@@ -94,14 +104,17 @@ src/
     update.js         one simulation step
     flow.js           title -> play -> cleared -> over
     input.js          pointer and keyboard bindings
+    particles.js      pooled dust
   render/             draws S, never mutates it
-    background.js     sky, skyline, road
+    background.js     dawn sky, skyline, curved road, crossroads, haze
     houses.js         frontage and the delivery pin
-    props.js          verge dressing and bunting
+    landmarks.js      temple, school, government office
+    props.js          verge dressing, hawkers, dozing dogs, bunting
     obstacles.js      cows, autos, thelas, potholes, scooters, tempos
+    crossings.js      dogs that bolt across the road — and telegraph first
     effects.js        bundles, dust, papers in flight
-    rider.js          the bike and its arms
-    hud.js            score, lives, papers, and the timing gauges
+    rider.js          the scooter and its arms
+    hud.js            score, lives, papers, timing gauges, turn sign
     screens.js        title, street cleared, round over
     scene.js          composites one frame
 ```
@@ -116,10 +129,15 @@ were.
 The numbers [claude.md](claude.md) §2 warns about are now in one file each:
 
 - Projection and throw timing — `src/core/projection.js`
-  (`HORIZON`, `CAMH`, `FOCAL`, `ROAD_HALF`, `LANES`, `HOUSE_X`, `FLIGHT`, `LEAD`)
+  (`HORIZON`, `CAMH`, `FOCAL_BASE`, `ROAD_HALF`, `LANES`, `HOUSE_X`, `FLIGHT`, `LEAD`)
 - Throw tolerances and `landZ()` — `src/game/throwing.js`
   (`PERFECT_TOL`, `HIT_TOL`)
-- Street generation and difficulty curve — `src/game/level.js`
+- Difficulty curve — `src/game/level.js`: `speedFor`, `targetsFor`,
+  `gapTimeFor`, `twoLaneChance`, and the paper economy just below them. Change
+  any of these and re-run `npm test`; the bot will say if you made a level
+  unfair.
+- Camera feel — the `camera()` function in `src/game/update.js`
+- Engine note — `startEngine`/`setEngine` in `src/core/audio.js`
 - Colours — `src/core/palette.js`
 
 `landZ()` is still the single source of truth for where a paper lands. The
@@ -133,6 +151,20 @@ Every module reads and writes one shared object rather than passing state
 around. That is how the prototype worked and the split kept it deliberately —
 it is the simplest thing that works for a game this size, and it keeps the
 `__HOOK__` seam honest. If it ever needs to change, `state.js` owns the shape.
+
+### Two things worth knowing before you tune anything
+
+**Obstacle spacing is a reaction time, not a distance.** `gapTimeFor(n)` returns
+seconds and the generator multiplies it by that level's speed. As the ride gets
+faster the gap in metres grows with it, so streets get denser without becoming
+undodgeable. Tuning the gap in metres is exactly how levels 9 and up became
+unplayable the first time this was tried.
+
+**The road bends by offsetting its centre line.** `core/projection.js` holds a
+lookup table of lateral offset per depth, built once per level. `sxAt()` adds
+that offset, so houses, obstacles, dust and papers in flight all follow the bend
+for free. Heading rises to a peak through a junction and returns to zero, which
+keeps the world on a single z axis while the ride reads as turning a corner.
 
 ## History
 
