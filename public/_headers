@@ -17,4 +17,5 @@
 
 # The icon never changes between builds; let it live in caches.
 /icon.png
+  ! Cache-Control
   Cache-Control: public, max-age=604800
