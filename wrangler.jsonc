@@ -1,0 +1,17 @@
+{
+  // Cloudflare Workers config. This is a static-assets-only Worker: no code
+  // runs on the edge, it just serves dist/. `npx wrangler deploy` reads this.
+  //
+  // The repo was set up for Pages (claude.md 5) but Cloudflare's dashboard
+  // now steers new projects to Workers; the two serve the same files. The
+  // free tier differs: Pages is unlimited, Workers is 100k requests/day,
+  // which is far more than a prototype will see.
+  "name": "paperdelapp",
+  "compatibility_date": "2025-06-01",
+  "assets": {
+    "directory": "./dist",
+    // serve /paper-round.html and /index.html as-is, no rewriting
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  }
+}
