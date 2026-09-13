@@ -106,5 +106,7 @@ function toggleMute(){
 }
 /* Browsers start the context suspended until the first gesture. */
 function resumeAudio(){ ctxOrNull(); }
+/* Silence everything, engine included, without tearing the nodes down. */
+function suspendAudio(){ try{ if(actx && actx.state==='running') actx.suspend(); }catch(e){} }
 
-export { blip, toggleMute, resumeAudio, startEngine, setEngine, stopEngine };
+export { blip, toggleMute, resumeAudio, suspendAudio, startEngine, setEngine, stopEngine };

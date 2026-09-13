@@ -46,6 +46,8 @@ canvas{display:block;width:100%;height:100%;touch-action:none}
  *   src/core/projection.js
  *   src/core/palette.js
  *   src/game/particles.js
+ *   src/core/telemetry.js
+ *   src/game/analytics.js
  *   src/game/level.js
  *   src/core/audio.js
  *   src/game/throwing.js
@@ -88,6 +90,7 @@ var S = {
   /* road curvature, sampled every CURVE_STEP units by buildLevel */
   curve:null, junctions:[], turnSign:0, turnT:0,
 
+  paused:false, stats:null,
   t:0, stun:0, shake:0, combo:0,
   arm:0, armSide:1,
   tutorial:0, perfect:false, failed:false,
@@ -253,6 +256,108 @@ function updateDust(dt){
   }
 }
 
+/* ---- core/telemetry.js ---- */
+// The thinnest possible event beacon. claude.md section 5: "a tiny custom
+// beacon is fine, don't pull in a heavy SDK."
+//
+// Every event is one small POST to /e on the same origin, which the Worker in
+// worker/index.js writes to Analytics Engine. sendBeacon is used so events
+// still go out while the page is being backgrounded or closed — the moment
+// that matters most for "where did they quit".
+//
+// It is a no-op unless served over http(s): nothing is sent from a file://
+// double-click, from the headless tests, or from anywhere without a window.
+// No personal data is collected: a random per-load session id and the event
+// fields, nothing else.
+
+var enabled = (typeof window !== 'undefined' && typeof location !== 'undefined' &&
+               /^https?:$/.test(location.protocol) && typeof navigator !== 'undefined');
+
+var session = (function(){
+  var s = '';
+  for(var i=0;i<16;i++) s += (Math.random()*16|0).toString(16);
+  return s;
+})();
+
+var t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
+function elapsed(){ return (typeof performance !== 'undefined' && performance.now) ? (performance.now()-t0)/1000 : 0; }
+
+/* name: short string. data: flat object of strings/numbers. */
+function track(name, data){
+  if(!enabled) return;
+  try{
+    var payload = { e:name, s:session, t:Math.round(elapsed()) };
+    if(data) for(var k in data) if(Object.prototype.hasOwnProperty.call(data,k)) payload[k] = data[k];
+    var body = JSON.stringify(payload);
+    if(navigator.sendBeacon && navigator.sendBeacon('/e', new Blob([body], { type:'text/plain' }))) return;
+    if(typeof fetch === 'function') fetch('/e', { method:'POST', body:body, keepalive:true, headers:{'content-type':'text/plain'} }).catch(function(){});
+  }catch(e){}
+}
+
+/* ---- game/analytics.js ---- */
+// What we measure and when. The question this prototype exists to answer is
+// whether players reach level 2 (claude.md section 5), so everything here is
+// in service of a funnel: started -> level 1 cleared -> level 2 started -> ...
+// and, for the ones who leave, where they were when they left.
+//
+// Throws and crashes are counted per level and sent once at the end of the
+// street rather than as individual events — same information, a fraction of
+// the traffic.
+
+function resetLevelStats(){
+  S.stats = { perfect:0, hit:0, early:0, late:0, miss:0, crashes:{}, crashN:0 };
+}
+
+function countThrow(grade){ if(S.stats) S.stats[grade] = (S.stats[grade]||0) + 1; }
+function countCrash(type){
+  if(!S.stats) return;
+  S.stats.crashN++;
+  S.stats.crashes[type] = (S.stats.crashes[type]||0) + 1;
+}
+
+/* where on the street the rider is, 0..1 */
+function progress(){ return S.trackLen ? Math.round(100*Math.min(1, S.trackPos/S.trackLen)) : 0; }
+
+function levelStarted(level, retry){
+  track('level_start', { level:level, retry:retry?1:0, lives:S.lives, papers:S.papers });
+}
+
+function levelEnded(cleared){
+  var st = S.stats || {};
+  var crashes = Object.keys(st.crashes||{}).map(function(k){ return k+':'+st.crashes[k]; }).join(',');
+  track(cleared ? 'level_clear' : 'level_fail', {
+    level:S.level, delivered:S.delivered, need:S.need, targets:S.targets,
+    score:S.score, lives:S.lives, papers:S.papers,
+    perfect:st.perfect||0, hit:st.hit||0, early:st.early||0, late:st.late||0, miss:st.miss||0,
+    crashN:st.crashN||0, crashes:crashes
+  });
+}
+
+function gameOver(){
+  track('game_over', { level:S.level, score:S.score, best:S.best });
+}
+
+/* Sent when the tab is hidden — the phone locked, the app switched. This is
+   the "quit point" in practice: most people never come back. */
+function backgrounded(){
+  track('background', { mode:S.mode, level:S.level, progress:progress(),
+                        delivered:S.delivered, lives:S.lives, secs:Math.round(elapsed()) });
+}
+function foregrounded(){
+  track('foreground', { mode:S.mode, level:S.level });
+}
+
+function sessionStarted(){
+  var ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+  var platform = /android/i.test(ua) ? 'android' : /iphone|ipad|ipod/i.test(ua) ? 'ios' : 'desktop';
+  var w = (typeof window !== 'undefined') ? window.innerWidth : 0;
+  var h = (typeof window !== 'undefined') ? window.innerHeight : 0;
+  track('session_start', { platform:platform, w:w, h:h, dpr:(typeof window!=='undefined'&&window.devicePixelRatio)||1 });
+}
+
+{ resetLevelStats, countThrow, countCrash, levelStarted, levelEnded, gameOver,
+         backgrounded, foregrounded, sessionStarted };
+
 /* ---- game/level.js ---- */
 // Procedurally lays out one street: houses, landmarks, the round, verge
 // dressing, crossroads, obstacles and bundles.
@@ -283,6 +388,7 @@ function buildLevel(n){
   S.delivered = 0; S.combo = 0; S.stun = 0; S.shake = 0; S.arm = 0;
   S.objs = []; S.shots = []; S.pops = []; resetDust();
   S.perfect = false; S.turnSign = 0; S.turnT = 0;
+  resetLevelStats();
 
   var z, side, i;
 
@@ -590,6 +696,8 @@ function toggleMute(){
 }
 /* Browsers start the context suspended until the first gesture. */
 function resumeAudio(){ ctxOrNull(); }
+/* Silence everything, engine included, without tearing the nodes down. */
+function suspendAudio(){ try{ if(actx && actx.state==='running') actx.suspend(); }catch(e){} }
 
 /* ---- game/throwing.js ---- */
 // Throw timing: which house you are aiming at, and how well you timed it.
@@ -618,7 +726,7 @@ function aimProgress(house){
 }
 
 function toss(side){
-  if(S.mode!=='play' || S.stun>0 || S.arm>0) return;
+  if(S.mode!=='play' || S.stun>0 || S.arm>0 || S.paused) return;
   if(S.papers<=0){ callout('NO PAPERS LEFT', C.bad); return; }
   var tgt = findTarget(side);
   S.papers--;
@@ -632,6 +740,7 @@ function toss(side){
     else if(Math.abs(err) <= HIT_TOL) grade = 'hit';
     else grade = (err > 0) ? 'early' : 'late';
   }
+  countThrow(grade);
   if(grade === 'miss') { S.combo = 0; S.score = Math.max(0, S.score-15); }
   if(grade === 'early' || grade === 'late'){ S.combo = 0; }
   if(tgt && (grade==='perfect'||grade==='hit')) tgt.claimed = true;
@@ -649,17 +758,19 @@ function callout(txt,col){ S.callout=txt; S.calloutCol=col; S.calloutT=1.1; }
 // Player actions and their consequences.
 
 function setLane(dir){
-  if(S.mode!=='play' || S.stun>0) return;
+  if(S.mode!=='play' || S.stun>0 || S.paused) return;
   var nl = clamp(S.lane+dir,0,2);
   if(nl!==S.lane){ S.lane=nl; blip(400,.05); }
 }
-function crash(){
+/* type: what you hit — an obstacle type or 'dog'. Counted per level. */
+function crash(type){
   if(S.stun>0) return;
+  countCrash(type||'unknown');
   S.lives--; S.combo=0; S.stun=1.2; S.shake=16;
   callout('CRASH!', C.bad);
   blip(85,.32,'sawtooth');
   for(var i=0;i<14;i++) spawnDust(S.px+rnd(-.5,.5), S.trackPos+rnd(2.5,5), rnd(0.10,0.22));
-  if(S.lives<=0){ S.mode='over'; if(S.score>S.best) S.best=S.score; }
+  if(S.lives<=0){ S.mode='over'; if(S.score>S.best) S.best=S.score; gameOver(); }
 }
 
 /* ---- game/update.js ---- */
@@ -682,6 +793,9 @@ function update(dt){
   if(S.turnT>0) S.turnT -= dt;
 
   setCamZ(S.trackPos);
+
+  /* hidden tab or locked phone: the world holds still, nothing advances */
+  if(S.paused) return;
 
   if(S.mode==='title'){
     S.trackPos += S.speed*0.5*dt;
@@ -762,7 +876,7 @@ function update(dt){
     o = S.objs[i]; rel = o.z - S.trackPos;
     if(o.kind==='obs' && !o.checked && rel<0.9){
       o.checked = true;
-      if(S.stun<=0 && Math.abs(o.x-S.px) < 0.42) crash();
+      if(S.stun<=0 && Math.abs(o.x-S.px) < 0.42) crash(o.type);
     } else if(o.kind==='pickup' && !o.checked && rel<0.9){
       o.checked = true;
       if(Math.abs(o.x-S.px) < 0.45){
@@ -781,9 +895,11 @@ function update(dt){
       S.score += 250 + S.delivered*30 + S.papers*5;
       if(S.perfect && S.lives<5) S.lives++;
       S.failed = false; S.mode='clear'; blip(700,.12);
+      levelEnded(true);
     } else {
       S.lives--; S.failed = true;
-      if(S.lives<=0){ S.mode='over'; if(S.score>S.best) S.best=S.score; }
+      levelEnded(false);
+      if(S.lives<=0){ S.mode='over'; if(S.score>S.best) S.best=S.score; gameOver(); }
       else S.mode='clear';
       blip(170,.3,'sawtooth');
     }
@@ -831,24 +947,28 @@ function crossings(dt){
 
     if(!o.checked && rel < 0.9){
       o.checked = true;
-      if(S.stun<=0 && o.phase!=='gone' && Math.abs(o.x-S.px) < 0.44) crash();
+      if(S.stun<=0 && o.phase!=='gone' && Math.abs(o.x-S.px) < 0.44) crash('dog');
     }
   }
 }
 
 /* ---- game/flow.js ---- */
-// Moving between title, play, street-cleared and game-over.
+// Moving between title, play, street-cleared and game-over — and pausing
+// when the phone locks or the tab is hidden.
 
 function startGame(){
   S.level=1; S.score=0; S.lives=3; S.failed=false;
   buildLevel(1); S.tutorial=5; S.mode='play';
   startEngine();
+  levelStarted(1, false);
 }
 function nextStreet(){
+  var retry = S.failed;
   if(S.failed){ S.failed=false; buildLevel(S.level); }
   else { buildLevel(S.level+1); }
   S.mode='play';
   startEngine();
+  levelStarted(S.level, retry);
 }
 function press(){
   resumeAudio();
@@ -856,12 +976,34 @@ function press(){
   else if(S.mode==='clear') nextStreet();
   else if(S.mode==='over') startGame();
 }
-/* Cut the engine when the ride stops, so the title and game-over screens are
-   quiet. update() restarts it on the next press. */
-function idleAudio(){ stopEngine(); }
+
+/* ---- pause ------------------------------------------------------------------
+   The page is hidden: the phone locked, the app switched, the tab changed. The
+   world freezes and the audio context is suspended, so nothing runs or makes a
+   sound in the background. On return we stay paused until the player taps, so
+   they are never dropped straight into a crash (claude.md section 3). */
+function pause(){
+  if(S.paused) return;
+  S.paused = true;
+  suspendAudio();
+  backgrounded();
+}
+function unpause(){
+  if(!S.paused) return;
+  S.paused = false;
+  resumeAudio();
+  foregrounded();
+}
+/* Called on visibilitychange. Only auto-resumes audio outside of play; in play
+   the player's tap does it, via unpause(). */
+function visibility(hidden){
+  if(hidden) pause();
+  else if(S.mode!=='play') unpause();
+}
 
 /* ---- game/input.js ---- */
-// Pointer (swipe to steer, tap a side to throw) and keyboard controls.
+// Pointer (swipe to steer, tap a side to throw), keyboard, and the page
+// visibility hook that pauses the game when the phone locks.
 
 function attachInput(){
   if (typeof window!=='undefined' && window.addEventListener){
@@ -880,6 +1022,8 @@ function attachInput(){
     cv.addEventListener('pointerup',function(){
       if(!down) return;
       var swipe=down.moved, x=down.x; down=null;
+      /* first tap after coming back only resumes — never throws */
+      if(S.paused){ unpause(); return; }
       if(S.mode!=='play'){ press(); return; }
       if(!swipe) toss(x<DW/2?-1:1);
     });
@@ -889,6 +1033,7 @@ function attachInput(){
       var k=e.key.toLowerCase();
       if(['arrowleft','arrowright',' '].indexOf(k)>=0) e.preventDefault();
       if(e.repeat) return;
+      if(S.paused){ unpause(); return; }
       if(S.mode!=='play'){ if(k===' '||k==='enter') press(); return; }
       if(k==='arrowleft') setLane(-1);
       if(k==='arrowright') setLane(1);
@@ -896,6 +1041,16 @@ function attachInput(){
       if(k==='e'||k==='d'||k==='m') toss(1);
       if(k==='p') toggleMute();
     },{passive:false});
+
+    /* phone locked, app switched, tab hidden -> freeze and go quiet.
+       pagehide covers iOS Safari, which does not always fire visibilitychange. */
+    if (typeof document!=='undefined' && document.addEventListener){
+      document.addEventListener('visibilitychange', function(){ visibility(document.hidden); });
+      window.addEventListener('pagehide', function(){ visibility(true); });
+      window.addEventListener('blur', function(){ if(S.mode==='play') visibility(true); });
+    }
+
+    sessionStarted();
   }
 }
 
@@ -2106,6 +2261,16 @@ function drawOver(){
   button(DW/2,420,176,44,'RIDE AGAIN');
 }
 
+/* Shown after the phone unlocks or the tab comes back. The world is frozen
+   behind it; the first tap resumes and is never read as a throw. */
+function drawPaused(){
+  ctx.fillStyle='rgba(8,12,20,0.55)'; ctx.fillRect(0,0,DW,DH);
+  panel(262,170);
+  label('PAUSED',DW/2,318,30,C.hud,'center','800');
+  label('Tap or press a key to carry on',DW/2,352,14,C.hudDim,'center','600');
+  button(DW/2,398,176,44,'RESUME');
+}
+
 /* ---- render/scene.js ---- */
 // Composites one frame: background, depth-sorted world, effects, rider, UI.
 
@@ -2191,6 +2356,7 @@ function render(){
     if(S.mode==='clear') drawClear();
     if(S.mode==='over') drawOver();
   }
+  if(S.paused && S.mode==='play') drawPaused();
 }
 
 /* ---- main.js ---- */
@@ -2215,7 +2381,7 @@ if (typeof window!=='undefined' && window.requestAnimationFrame){
 if (typeof globalThis!=='undefined' && globalThis.__HOOK__){
   globalThis.__HOOK__({ S:S, update:update, render:render, buildLevel:buildLevel,
     startGame:startGame, toss:toss, setLane:setLane, findTarget:findTarget, landZ:landZ,
-    nextStreet:nextStreet, press:press });
+    nextStreet:nextStreet, press:press, pause:pause, unpause:unpause });
 }
 
 })();

@@ -1,5 +1,5 @@
 // Full-screen overlays: title, street cleared, round over.
-import { ctx, DW } from '../core/canvas.js';
+import { ctx, DW, DH } from '../core/canvas.js';
 import { C } from '../core/palette.js';
 import { fillRR, circle, label } from '../core/draw.js';
 import { S } from '../game/state.js';
@@ -53,4 +53,14 @@ function drawOver(){
   button(DW/2,420,176,44,'RIDE AGAIN');
 }
 
-export { drawTitle, drawClear, drawOver };
+/* Shown after the phone unlocks or the tab comes back. The world is frozen
+   behind it; the first tap resumes and is never read as a throw. */
+function drawPaused(){
+  ctx.fillStyle='rgba(8,12,20,0.55)'; ctx.fillRect(0,0,DW,DH);
+  panel(262,170);
+  label('PAUSED',DW/2,318,30,C.hud,'center','800');
+  label('Tap or press a key to carry on',DW/2,352,14,C.hudDim,'center','600');
+  button(DW/2,398,176,44,'RESUME');
+}
+
+export { drawTitle, drawClear, drawOver, drawPaused };

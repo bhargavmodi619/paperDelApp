@@ -10,7 +10,7 @@ globalThis.__HOOK__ = a => { api = a; };
 await import('../src/main.js');
 
 assert.ok(api, 'main.js should hand the test hook its API');
-const { S, update, render, startGame, toss, setLane, findTarget, landZ, buildLevel } = api;
+const { S, update, render, startGame, toss, setLane, findTarget, landZ, buildLevel, pause, unpause } = api;
 
 const step = (n, dt = 1/60) => { for (let i = 0; i < n; i++){ update(dt); render(); } };
 
@@ -155,6 +155,37 @@ test('throwing with no papers left is refused, not crashed', () => {
   toss(1);
   assert.equal(S.shots.length, before, 'no paper leaves the basket');
   assert.equal(S.papers, 0);
+});
+
+test('pausing freezes the world; the first input only resumes', () => {
+  startGame();
+  step(30);
+  const pos = S.trackPos, papers = S.papers;
+  pause();
+  assert.equal(S.paused, true);
+  step(120);
+  assert.equal(S.trackPos, pos, 'nothing moves while paused');
+  toss(1);
+  assert.equal(S.papers, papers, 'a throw while paused is ignored');
+  setLane(-1);
+  assert.equal(S.lane, 1, 'steering while paused is ignored');
+  unpause();
+  assert.equal(S.paused, false);
+  step(10);
+  assert.ok(S.trackPos > pos, 'and it moves again afterwards');
+});
+
+test('every level tallies throws and crashes for the beacon', () => {
+  startGame();
+  assert.ok(S.stats && typeof S.stats.perfect === 'number');
+  S.lives = 99;
+  let tossed = 0;
+  for (let i = 0; i < 6000 && tossed < 3; i++){
+    if (S.arm <= 0 && S.papers > 0 && (findTarget(1) || findTarget(-1))){ toss(findTarget(1) ? 1 : -1); tossed++; }
+    step(1);
+  }
+  const st = S.stats;
+  assert.equal(st.perfect + st.hit + st.early + st.late + st.miss, tossed, 'each throw lands in exactly one bucket');
 });
 
 test('reaching the end of the street resolves the level', () => {

@@ -9,6 +9,7 @@ import { callout } from './throwing.js';
 import { crash } from './actions.js';
 import { bendHeading } from './level.js';
 import { spawnDust, updateDust } from './particles.js';
+import { levelEnded, gameOver } from './analytics.js';
 
 /* Approach a target with a time-constant instead of a per-frame fraction, so
    the feel does not change with framerate. rate is "how much of the gap is
@@ -26,6 +27,9 @@ function update(dt){
   if(S.turnT>0) S.turnT -= dt;
 
   setCamZ(S.trackPos);
+
+  /* hidden tab or locked phone: the world holds still, nothing advances */
+  if(S.paused) return;
 
   if(S.mode==='title'){
     S.trackPos += S.speed*0.5*dt;
@@ -106,7 +110,7 @@ function update(dt){
     o = S.objs[i]; rel = o.z - S.trackPos;
     if(o.kind==='obs' && !o.checked && rel<0.9){
       o.checked = true;
-      if(S.stun<=0 && Math.abs(o.x-S.px) < 0.42) crash();
+      if(S.stun<=0 && Math.abs(o.x-S.px) < 0.42) crash(o.type);
     } else if(o.kind==='pickup' && !o.checked && rel<0.9){
       o.checked = true;
       if(Math.abs(o.x-S.px) < 0.45){
@@ -125,9 +129,11 @@ function update(dt){
       S.score += 250 + S.delivered*30 + S.papers*5;
       if(S.perfect && S.lives<5) S.lives++;
       S.failed = false; S.mode='clear'; blip(700,.12);
+      levelEnded(true);
     } else {
       S.lives--; S.failed = true;
-      if(S.lives<=0){ S.mode='over'; if(S.score>S.best) S.best=S.score; }
+      levelEnded(false);
+      if(S.lives<=0){ S.mode='over'; if(S.score>S.best) S.best=S.score; gameOver(); }
       else S.mode='clear';
       blip(170,.3,'sawtooth');
     }
@@ -175,7 +181,7 @@ function crossings(dt){
 
     if(!o.checked && rel < 0.9){
       o.checked = true;
-      if(S.stun<=0 && o.phase!=='gone' && Math.abs(o.x-S.px) < 0.44) crash();
+      if(S.stun<=0 && o.phase!=='gone' && Math.abs(o.x-S.px) < 0.44) crash('dog');
     }
   }
 }

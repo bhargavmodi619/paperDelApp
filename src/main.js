@@ -8,7 +8,7 @@ import { buildLevel } from './game/level.js';
 import { initDust } from './game/particles.js';
 import { update } from './game/update.js';
 import { attachInput } from './game/input.js';
-import { startGame, nextStreet, press } from './game/flow.js';
+import { startGame, nextStreet, press, pause, unpause } from './game/flow.js';
 import { toss, findTarget, landZ } from './game/throwing.js';
 import { setLane } from './game/actions.js';
 import { render } from './render/scene.js';
@@ -29,5 +29,5 @@ if (typeof window!=='undefined' && window.requestAnimationFrame){
 if (typeof globalThis!=='undefined' && globalThis.__HOOK__){
   globalThis.__HOOK__({ S:S, update:update, render:render, buildLevel:buildLevel,
     startGame:startGame, toss:toss, setLane:setLane, findTarget:findTarget, landZ:landZ,
-    nextStreet:nextStreet, press:press });
+    nextStreet:nextStreet, press:press, pause:pause, unpause:unpause });
 }

@@ -4,6 +4,7 @@ import { clamp } from '../core/math.js';
 import { HOUSE_X, FLIGHT, LEAD } from '../core/projection.js';
 import { C } from '../core/palette.js';
 import { blip } from '../core/audio.js';
+import { countThrow } from './analytics.js';
 
 /* the paper lands here, in world z, if thrown right now */
 function landZ(){ return S.trackPos + S.speed*FLIGHT + LEAD; }
@@ -29,7 +30,7 @@ function aimProgress(house){
 }
 
 function toss(side){
-  if(S.mode!=='play' || S.stun>0 || S.arm>0) return;
+  if(S.mode!=='play' || S.stun>0 || S.arm>0 || S.paused) return;
   if(S.papers<=0){ callout('NO PAPERS LEFT', C.bad); return; }
   var tgt = findTarget(side);
   S.papers--;
@@ -43,6 +44,7 @@ function toss(side){
     else if(Math.abs(err) <= HIT_TOL) grade = 'hit';
     else grade = (err > 0) ? 'early' : 'late';
   }
+  countThrow(grade);
   if(grade === 'miss') { S.combo = 0; S.score = Math.max(0, S.score-15); }
   if(grade === 'early' || grade === 'late'){ S.combo = 0; }
   if(tgt && (grade==='perfect'||grade==='hit')) tgt.claimed = true;

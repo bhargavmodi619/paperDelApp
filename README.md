@@ -89,7 +89,28 @@ name, change `url` there** — that's the only place it lives.
 `icon.png` is drawn in code (`tools/icon.js`) and encoded with Node's built-in
 zlib, so there is no binary to check in and no image tool to install.
 
-## Deploying (Cloudflare Pages)
+## Analytics
+
+The prototype exists to answer one question — do players reach level 2 — so
+it measures a funnel and not much else (claude.md §5).
+
+- `src/core/telemetry.js` — the transport. One small `sendBeacon` POST to `/e`
+  per event. A no-op on `file://`, in the tests, and anywhere without a window.
+- `src/game/analytics.js` — what is sent: `session_start`, `level_start`
+  (with a retry flag), `level_clear` / `level_fail` (with throw grades and
+  crashes-by-type tallied over the street), `game_over`, and `background` /
+  `foreground` when the phone locks or the tab hides — which is the quit point
+  in practice.
+- `worker/index.js` — the one server function. Validates the event and writes
+  a row to Workers Analytics Engine. Everything else falls through to `dist/`.
+- `tools/stats.js` — prints the funnel:
+  `CF_ACCOUNT_ID=… CF_API_TOKEN=… node tools/stats.js [days]`.
+  The token needs only *Account Analytics: Read*.
+
+No cookies, no IPs, no user agents are stored: a random per-load session id
+and the event fields.
+
+## Deploying (Cloudflare Workers)
 
 Chosen in [claude.md](claude.md) §5: free, no card, commercial use allowed.
 

@@ -13,7 +13,7 @@ import { drawCrossing } from './crossings.js';
 import { drawPickup, drawDust, drawShot } from './effects.js';
 import { drawRider } from './rider.js';
 import { drawHUD } from './hud.js';
-import { drawTitle, drawClear, drawOver } from './screens.js';
+import { drawTitle, drawClear, drawOver, drawPaused } from './screens.js';
 
 /* The visible list is rebuilt every frame; pooling the entries keeps that
    from allocating a few hundred short-lived objects a second. */
@@ -97,6 +97,7 @@ function render(){
     if(S.mode==='clear') drawClear();
     if(S.mode==='over') drawOver();
   }
+  if(S.paused && S.mode==='play') drawPaused();
 }
 
 export { render };

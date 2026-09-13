@@ -14,6 +14,7 @@ var S = {
   /* road curvature, sampled every CURVE_STEP units by buildLevel */
   curve:null, junctions:[], turnSign:0, turnT:0,
 
+  paused:false, stats:null,
   t:0, stun:0, shake:0, combo:0,
   arm:0, armSide:1,
   tutorial:0, perfect:false, failed:false,

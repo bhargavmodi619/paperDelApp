@@ -6,6 +6,7 @@ import { HOUSE_X, LANES } from '../core/projection.js';
 import { setCurveTable } from '../core/projection.js';
 import { WALLS, ROOFS } from '../core/palette.js';
 import { resetDust } from './particles.js';
+import { resetLevelStats } from './analytics.js';
 
 var CURVE_STEP = 2;
 
@@ -33,6 +34,7 @@ function buildLevel(n){
   S.delivered = 0; S.combo = 0; S.stun = 0; S.shake = 0; S.arm = 0;
   S.objs = []; S.shots = []; S.pops = []; resetDust();
   S.perfect = false; S.turnSign = 0; S.turnT = 0;
+  resetLevelStats();
 
   var z, side, i;
 
