@@ -71,11 +71,38 @@ tests do not replace rendering a frame and inspecting it.
 
 ## Build
 
-`build.js` is plain Node with no packages. It walks the import graph from
-`src/main.js`, strips the `import`/`export` lines, concatenates the modules in
-dependency order inside one IIFE, and inlines `src/styles.css`. That round-trips
-cleanly because every module is nothing but top-level `var`/`function`
-declarations.
+`build.js` is plain Node with no packages. It does two things:
+
+1. Walks the import graph from `src/main.js`, strips the `import`/`export`
+   lines, concatenates the modules in dependency order inside one IIFE, and
+   inlines `src/styles.css` → `paper-round.html`. That round-trips cleanly
+   because every module is nothing but top-level `var`/`function` declarations.
+2. Assembles `dist/` — only what a player's browser needs — for Cloudflare
+   Pages: `index.html`, `src/`, `paper-round.html`, `robots.txt`, `_headers`,
+   and `icon.png`. `dist/` is gitignored; Cloudflare builds it on each push.
+
+`site.json` holds the public URL, title and description. They are stamped into
+the `<head>` of both outputs so the WhatsApp / iMessage share card has an
+absolute image URL. **If your Cloudflare project gets a different `*.pages.dev`
+name, change `url` there** — that's the only place it lives.
+
+`icon.png` is drawn in code (`tools/icon.js`) and encoded with Node's built-in
+zlib, so there is no binary to check in and no image tool to install.
+
+## Deploying (Cloudflare Pages)
+
+Chosen in [claude.md](claude.md) §5: free, no card, commercial use allowed.
+
+1. cloudflare.com → Workers & Pages → Create → Pages → **Connect to Git** →
+   pick this repo.
+2. Production branch `main`. Build command `node build.js`. Build output
+   directory `dist`. No environment variables, no install step.
+3. Save. Every push to `main` goes live; every push to `develop` gets its own
+   preview URL, which is how you try a build on a phone before it's real.
+
+While testing, the site is deliberately unlisted: `<meta name="robots">`,
+`robots.txt`, and an `X-Robots-Tag` header all say noindex. `_headers` also
+turns off caching so testers never see a stale build.
 
 The `__HOOK__` export at the end of `src/main.js` survives the build. Keep it —
 [claude.md](claude.md) §6 depends on it, and so do both test suites.

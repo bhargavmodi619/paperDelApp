@@ -1,0 +1,3 @@
+# Unlisted while the prototype is being tested. claude.md section 5.
+User-agent: *
+Disallow: /
