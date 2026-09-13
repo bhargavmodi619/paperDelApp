@@ -23,6 +23,7 @@ canvas{display:block;width:100%;height:100%;touch-action:none}
  *   src/core/canvas.js
  *   src/core/projection.js
  *   src/core/palette.js
+ *   src/game/particles.js
  *   src/game/level.js
  *   src/core/audio.js
  *   src/game/throwing.js
@@ -33,8 +34,10 @@ canvas{display:block;width:100%;height:100%;touch-action:none}
  *   src/core/draw.js
  *   src/render/background.js
  *   src/render/houses.js
+ *   src/render/landmarks.js
  *   src/render/props.js
  *   src/render/obstacles.js
+ *   src/render/crossings.js
  *   src/render/effects.js
  *   src/render/rider.js
  *   src/render/hud.js
@@ -52,8 +55,17 @@ var S = {
   mode:'title', level:1, score:0, lives:3, best:0,
   trackPos:0, trackLen:0, speed:8.5,
   lane:1, px:0, lean:0,
+
+  /* camera: bob and a little lateral lag behind the rider, so lane changes
+     have weight instead of snapping */
+  camX:0, camBob:0, camRoll:0, focal:330,
+
   papers:0, delivered:0, need:0, targets:0,
   objs:[], shots:[], pops:[], dust:[],
+
+  /* road curvature, sampled every CURVE_STEP units by buildLevel */
+  curve:null, junctions:[], turnSign:0, turnT:0,
+
   t:0, stun:0, shake:0, combo:0,
   arm:0, armSide:1,
   tutorial:0, perfect:false, failed:false,
@@ -87,72 +99,247 @@ if (typeof window !== 'undefined' && window.addEventListener){ resize(); window.
 
 /* ---- core/projection.js ---- */
 // The pinhole camera that turns world (x, z) into screen (x, y).
+//
+// Note the convention: callers pass RELATIVE depth (o.z - S.trackPos), not
+// absolute z. The camera keeps its own copy of where the rider is so it can
+// look the road curvature up without importing game state.
 
 var HORIZON = 250;
-var CAMH = 1.6, FOCAL = 330;       // wide lens: the street reads wide
+var CAMH = 1.6;
+var FOCAL_BASE = 330;              // wide lens: the street reads wide
 var ROAD_HALF = 1.35;
 var LANES = [-0.80, 0, 0.80];
 var HOUSE_X = 2.70;
 var FLIGHT = 0.45;                 // seconds a paper spends in the air
 var LEAD   = 1.6;                  // how far ahead of you it lands
 
-function yAt(z){ return HORIZON + CAMH*FOCAL/z; }
-function ppuAt(z){ return FOCAL/z; }
-function sxAt(x,z,px){ return DW/2 + (x-px)*ppuAt(z); }
+/* Focal length breathes with speed: the faster you ride, the wider the lens
+   pulls. Subtle and clamped — it also shifts where papers appear to land. */
+var focal = FOCAL_BASE;
+function setFocal(f){ focal = f; }
+
+/* ---- road curvature -------------------------------------------------------
+   The street is still a straight z axis; a curve is a lateral offset applied
+   to the road centre at each depth. Sampled into a table when the level is
+   built, so a lookup is a lerp rather than an integration. Everything drawn
+   through sxAt() bends with the road for free — houses, obstacles, papers in
+   flight, all of it. */
+var curveTable = null, curveStep = 1, camZ = 0;
+
+function setCurveTable(table, step){ curveTable = table; curveStep = step || 1; }
+function setCamZ(z){ camZ = z; }
+
+function curveAt(z){
+  if(!curveTable) return 0;
+  var f = z/curveStep;
+  if(f <= 0) return curveTable[0];
+  var i = f|0;
+  if(i >= curveTable.length-1) return curveTable[curveTable.length-1];
+  var frac = f-i;
+  return curveTable[i]*(1-frac) + curveTable[i+1]*frac;
+}
+
+/* How far the road has slid sideways, `rel` units ahead of the rider. */
+function bendAt(rel){ return curveAt(camZ+rel) - curveAt(camZ); }
+
+/* Heading of the road right under the rider — used to lean the bike. */
+function headingAt(rel){
+  var a = curveAt(camZ+rel), b = curveAt(camZ+rel+2);
+  return (b-a)/2;
+}
+
+function yAt(rel){ return HORIZON + CAMH*focal/rel; }
+function ppuAt(rel){ return focal/rel; }
+function sxAt(x,rel,px){ return DW/2 + (x - px + bendAt(rel))*ppuAt(rel); }
+
+{ HORIZON, CAMH, FOCAL_BASE, ROAD_HALF, LANES, HOUSE_X, FLIGHT, LEAD,
+         yAt, ppuAt, sxAt, setFocal, setCurveTable, setCamZ, curveAt, bendAt, headingAt };
 
 /* ---- core/palette.js ---- */
 // Every colour in the game, in one place.
+//
+// The round happens at dawn, so the palette is built around a low sun: cool
+// blue overhead falling to amber and peach at the horizon, warm light on the
+// east faces of buildings, and haze in the distance.
 var C = {
-  skyTop:'#4e9fd4', skyMid:'#8ec6e4', skyLow:'#dceff4', sun:'#fff3c6',
-  far:'#9fb0bc', far2:'#8799a8',
-  field:'#a8c46e', field2:'#93b25c', dryGrass:'#cbbd7c',
-  shoulder:'#c6ac7c', road:'#6f6a62', roadLite:'#7c7770', patch:'#5e5a53',
+  /* early-morning sky, top to bottom */
+  skyTop:'#3f7fb8', skyMid:'#8fb6d4', skyLow:'#f2d3a8', skyGlow:'#ffc98a',
+  sun:'#fff0c2', sunHalo:'rgba(255,200,120,0.40)',
+
+  /* distance: everything far away sits in warm mist */
+  haze:'#e8dcc4', hazeSoft:'rgba(232,220,196,0.85)',
+  far:'#a8a89e', far2:'#918f8a',
+
+  field:'#a8bc6c', field2:'#8fa65a', dryGrass:'#cbbd7c',
+  shoulder:'#c9ae7c', road:'#6b6660', roadLite:'#78736c', patch:'#5a5650',
   lane:'#efe2ad',
   ink:'#23252a',
+
+  /* warm morning light and the shadow it throws */
+  warm:'rgba(255,196,120,0.20)', warmStrong:'rgba(255,186,104,0.34)',
+  coolShadow:'rgba(48,62,96,0.16)',
+
   pin:'#ff8a15', pinDone:'#22bd58',
   paper:'#fdfbf0', paperInk:'#c4452f',
   hud:'#ffffff', hudDim:'rgba(255,255,255,0.66)', panel:'rgba(14,20,30,0.9)',
   bad:'#e8503a', good:'#22bd58', gold:'#ffc63a',
-  saffron:'#ff9933', green:'#138808'
+  saffron:'#ff9933', green:'#138808', chakra:'#000088',
+
+  /* landmarks */
+  temple:'#f2e2c4', templeTrim:'#d4553a', templeGold:'#e8b93a',
+  school:'#f0e6d0', schoolTrim:'#3f7fbf',
+  govt:'#e8e0cc', govtTrim:'#9c3f34'
 };
 var WALLS = ['#f6e7c6','#dfeadb','#efd9c6','#d9e8f2','#eadfef','#f2e3cf','#cfe3d8'];
 var ROOFS = ['#b4573f','#7d8a97','#9c6b4a','#5f7f8c','#a8724f'];
 
+/* ---- game/particles.js ---- */
+// Pooled dust. The old code pushed and spliced a fresh object every puff,
+// which is a steady drip of garbage on the hot path; this reuses a fixed
+// pool so a long run allocates nothing (claude.md section 7).
+
+var MAX = 140;
+var cursor = 0;
+
+function initDust(){
+  if(S.dust.length === MAX) { resetDust(); return; }
+  S.dust.length = 0;
+  for(var i=0;i<MAX;i++) S.dust.push({ x:0, z:0, t:0, r:0, active:false });
+  cursor = 0;
+}
+
+function resetDust(){
+  for(var i=0;i<S.dust.length;i++) S.dust[i].active = false;
+  cursor = 0;
+}
+
+/* Oldest puff is recycled once the pool is full — dust is the least
+   important thing on screen, so dropping one is invisible. */
+function spawnDust(x,z,r){
+  var d = S.dust[cursor];
+  cursor = (cursor+1) % S.dust.length;
+  d.x = x; d.z = z; d.r = r; d.t = 1; d.active = true;
+}
+
+function updateDust(dt){
+  var arr = S.dust;
+  for(var i=0;i<arr.length;i++){
+    var d = arr[i];
+    if(!d.active) continue;
+    d.t -= dt*1.6;
+    if(d.t <= 0) d.active = false;
+  }
+}
+
 /* ---- game/level.js ---- */
-// Procedurally lays out one street: houses, the round, verge dressing, obstacles, bundles.
+// Procedurally lays out one street: houses, landmarks, the round, verge
+// dressing, crossroads, obstacles and bundles.
+
+var CURVE_STEP = 2;
+
+/* ---- difficulty ----------------------------------------------------------
+   Every one of these rises with the level and none of them ever stops rising,
+   but speed and obstacle density approach a ceiling rather than climbing in a
+   straight line — a linear ramp is unplayable by level 12 and the whole point
+   is that it stays playable. The quota and the street length keep growing
+   linearly, so later levels are longer and denser rather than merely faster. */
+function speedFor(n){ return 8.5 + 3.4*(1 - Math.pow(0.86, n)) + Math.min(n,30)*0.03; }
+function targetsFor(n){ return 5 + n; }
+/* Spacing is a reaction time, not a distance: as speed climbs, the gap in
+   metres has to climb with it or the street stops being dodgeable. Floors at
+   about 1.25s between decisions. */
+function gapTimeFor(n){ return 2.00 - 0.72*(1 - Math.pow(0.87, n)); }
+function twoLaneChance(n){ return Math.min(0.32, 0.08 + n*0.026); }
 
 function buildLevel(n){
-  var lv = Math.min(n,8);
-  S.trackLen = 200 + lv*38;
-  S.speed    = 8.5 + lv*0.35;
-  S.targets  = 5 + Math.min(n,5);
-  S.papers   = S.targets + 6;
+  S.level = n;
+  S.speed    = speedFor(n);
+  S.targets  = targetsFor(n);
+  S.trackLen = 170 + S.targets*22;
   S.trackPos = 0; S.lane = 1; S.px = 0; S.lean = 0;
+  S.camX = 0; S.camBob = 0; S.camRoll = 0;
   S.delivered = 0; S.combo = 0; S.stun = 0; S.shake = 0; S.arm = 0;
-  S.objs = []; S.shots = []; S.pops = []; S.dust = [];
-  S.perfect = false;
+  S.objs = []; S.shots = []; S.pops = []; resetDust();
+  S.perfect = false; S.turnSign = 0; S.turnT = 0;
 
   var z, side, i;
 
-  /* frontage both sides */
+  /* ---- crossroads, and the bend the rider takes through each one ----------
+     A junction is a side street crossing the round. Just past it the road
+     swings hard one way and straightens again: heading rises to a peak and
+     returns to zero, so the world stays on a single z axis while the ride
+     reads as turning a corner. */
+  S.junctions = [];
+  var jz = rnd(78, 116);
+  while(jz < S.trackLen - 55){
+    S.junctions.push({
+      z: jz,
+      turnZ: jz + 6,
+      turnLen: 38,
+      /* peak heading, in world-x per world-z */
+      H: (Math.random()<0.5?-1:1) * rnd(0.17, 0.27),
+      seed: Math.random()*10
+    });
+    jz += rnd(118, 168);
+  }
+  buildCurve();
+
+  function nearJunction(zz, pad){
+    for(var k=0;k<S.junctions.length;k++)
+      if(Math.abs(S.junctions[k].z - zz) < pad) return true;
+    return false;
+  }
+
+  /* ---- landmarks: temple, school, government office ----------------------
+     Placed first so houses can give way to them. They are never on the round;
+     they are there so the street has civic landmarks, not just frontage. */
+  var landmarkTypes = ['temple','school','govt'];
+  var lz = rnd(46, 72);
+  var usedTypes = [];
+  while(lz < S.trackLen - 30){
+    var lt = pick(landmarkTypes);
+    if(usedTypes.length && usedTypes[usedTypes.length-1]===lt) lt = pick(landmarkTypes);
+    usedTypes.push(lt);
+    var lside = (Math.random()<0.5?-1:1);
+    S.objs.push({
+      kind:'landmark', type:lt, side:lside, x:lside*(HOUSE_X+0.34), z:lz,
+      w: lt==='school' ? rnd(3.4,4.0) : lt==='govt' ? rnd(2.9,3.3) : rnd(2.1,2.5),
+      h: lt==='temple' ? rnd(2.2,2.6) : rnd(1.7,2.0),
+      seed: Math.random()*10
+    });
+    lz += rnd(88, 132);
+  }
+  function nearLandmark(zz, sd){
+    for(var k=0;k<S.objs.length;k++){
+      var o = S.objs[k];
+      if(o.kind==='landmark' && o.side===sd && Math.abs(o.z-zz) < o.w*1.5+2.2) return true;
+    }
+    return false;
+  }
+
+  /* ---- frontage both sides ---- */
   for(side=-1; side<=1; side+=2){
     z = rnd(14,20);
     while(z < S.trackLen + 80){
-      S.objs.push({
-        kind:'house', side:side, x:side*HOUSE_X, z:z,
-        w:rnd(1.75,2.05), h:rnd(1.6,2.0),
-        wall:pick(WALLS), roof:pick(ROOFS),
-        storey:(Math.random()<0.30?2:1),
-        shop:(Math.random()<0.28),
-        target:false, done:false, claimed:false, tried:false,
-        seed:Math.random()*10
-      });
+      if(!nearJunction(z, 9) && !nearLandmark(z, side)){
+        S.objs.push({
+          kind:'house', side:side, x:side*HOUSE_X, z:z,
+          w:rnd(1.75,2.05), h:rnd(1.6,2.0),
+          wall:pick(WALLS), roof:pick(ROOFS),
+          storey:(Math.random()<0.30?2:1),
+          shop:(Math.random()<0.28),
+          target:false, done:false, claimed:false, tried:false,
+          seed:Math.random()*10
+        });
+      }
       z += rnd(3.4,5.0);
     }
   }
 
-  /* the round */
-  var cand = S.objs.filter(function(o){ return o.z>26 && o.z<S.trackLen-8; });
+  /* ---- the round ---- */
+  var cand = S.objs.filter(function(o){
+    return o.kind==='house' && o.z>26 && o.z<S.trackLen-8;
+  });
   cand.sort(function(a,b){ return a.z-b.z; });
   var step = cand.length/S.targets, placed = 0;
   for(i=0;i<S.targets;i++){
@@ -162,32 +349,61 @@ function buildLevel(n){
   S.targets = placed;
   S.need = Math.max(3, Math.ceil(S.targets*0.65));
 
-  /* verge dressing */
+  /* Papers are scarce on purpose: the quota plus two. Every wasted throw is
+     felt, and bundles on the road are the only way back. */
+  S.papers = S.need + 2;
+
+  /* ---- verge dressing ---- */
   for(z=12; z<S.trackLen+70; z+=rnd(5,9)){
+    if(nearJunction(z,7)) continue;
     S.objs.push({ kind:'prop', type:pick(['pole','tree','tree','hoarding','handpump']),
                   x:(Math.random()<0.5?-1:1)*rnd(1.55,1.95), z:z, seed:Math.random()*10 });
   }
-  /* chai stalls and dogs, occasional */
-  for(z=30; z<S.trackLen; z+=rnd(40,70)){
+  /* chai stalls, hawkers, dozing dogs — the street waking up */
+  for(z=30; z<S.trackLen; z+=rnd(38,64)){
     S.objs.push({ kind:'prop', type:'chai', x:(Math.random()<0.5?-1:1)*1.75, z:z, seed:Math.random()*10 });
   }
-  for(z=45; z<S.trackLen; z+=rnd(35,60)){
+  for(z=52; z<S.trackLen; z+=rnd(42,70)){
+    S.objs.push({ kind:'prop', type:'hawker', hawker:pick(['sabzi','fruit','milk','broom']),
+                  x:(Math.random()<0.5?-1:1)*rnd(1.6,1.9), z:z, seed:Math.random()*10 });
+  }
+  for(z=45; z<S.trackLen; z+=rnd(46,74)){
     S.objs.push({ kind:'prop', type:'dog', x:(Math.random()<0.5?-1:1)*rnd(1.5,1.8), z:z, seed:Math.random()*10 });
   }
   /* bunting across the street */
   for(z=55; z<S.trackLen; z+=rnd(55,90)){
+    if(nearJunction(z,10)) continue;
     S.objs.push({ kind:'bunting', x:0, z:z, seed:Math.random()*10 });
   }
 
-  /* obstacles: sparse, one free lane always reachable */
+  /* ---- crossing dogs -------------------------------------------------------
+     These are the only hazard that can move into your lane, so they always
+     telegraph: the dog is on the verge with its ears up for a beat before it
+     bolts. None at all on level 1 — the first street is where players decide
+     whether to keep going, so it teaches the throw and nothing else. */
+  var dogGap = Math.max(54, 128 - n*6);
+  for(z=(n<2 ? 1e9 : 68); z<S.trackLen-24; z+=rnd(dogGap, dogGap+50)){
+    if(nearJunction(z,12)) continue;
+    var from = (Math.random()<0.5?-1:1);
+    S.objs.push({
+      kind:'cross', type:'dog', z:z,
+      from:from, x:from*1.85, x0:from*1.85, x1:-from*1.85,
+      phase:'wait', t:0, checked:false,
+      speed:rnd(1.5,2.1) + n*0.05,
+      seed:Math.random()*10
+    });
+  }
+
+  /* ---- obstacles: sparse, one free lane always reachable ---- */
   var types = ['cow','auto','thela','pothole','scooter','tempo'];
   var freeLane = 1;
-  var gap = Math.max(11, 17 - lv*0.6);
+  var gap = S.speed * gapTimeFor(n);
   for(z=34; z<S.trackLen-12; z+=rnd(gap, gap+6)){
+    if(nearJunction(z,8)) continue;
     var opts = [freeLane-1, freeLane, freeLane+1].filter(function(l){ return l>=0&&l<=2; });
     freeLane = opts[(Math.random()*opts.length)|0];
     var others = [0,1,2].filter(function(l){ return l!==freeLane; });
-    var two = Math.random() < (0.12 + lv*0.045);
+    var two = Math.random() < twoLaneChance(n);
     if(!two) others = [others[(Math.random()*others.length)|0]];
     for(i=0;i<others.length;i++){
       var lane = others[i];
@@ -200,33 +416,158 @@ function buildLevel(n){
     }
   }
 
-  /* bundles */
-  for(z=50; z<S.trackLen-20; z+=rnd(45,70)){
+  /* ---- bundles: rarer and smaller than they were ---- */
+  for(z=48; z<S.trackLen-20; z+=rnd(56,86)){
+    if(nearJunction(z,7)) continue;
     var ln = (Math.random()*3)|0;
-    S.objs.push({ kind:'pickup', lane:ln, x:LANES[ln], z:z, taken:false, checked:false });
+    S.objs.push({ kind:'pickup', lane:ln, x:LANES[ln], z:z, amount:3, taken:false, checked:false });
   }
 
   S.objs.sort(function(a,b){ return a.z-b.z; });
 }
 
+/* Integrate the junction bends into a lookup table of lateral road offset.
+   heading rises to H at the middle of the bend and returns to zero, so the
+   road ends up shifted sideways but pointing straight again. */
+function buildCurve(){
+  var len = Math.ceil((S.trackLen + 160)/CURVE_STEP) + 2;
+  var table = new Float64Array(len);
+  var offset = 0;
+  for(var i=0;i<len;i++){
+    var z = i*CURVE_STEP;
+    var heading = 0;
+    for(var k=0;k<S.junctions.length;k++){
+      var j = S.junctions[k];
+      var t = (z - j.turnZ)/j.turnLen;
+      if(t>0 && t<1) heading += j.H*Math.sin(Math.PI*t);
+    }
+    offset += heading*CURVE_STEP;
+    table[i] = offset;
+  }
+  S.curve = table;
+  setCurveTable(table, CURVE_STEP);
+}
+
+/* How hard the road is bending where the rider is, for lean and camera roll. */
+function bendHeading(z){
+  var heading = 0;
+  for(var k=0;k<S.junctions.length;k++){
+    var j = S.junctions[k];
+    var t = (z - j.turnZ)/j.turnLen;
+    if(t>0 && t<1) heading += j.H*Math.sin(Math.PI*t);
+  }
+  return heading;
+}
+
 /* ---- core/audio.js ---- */
-// One oscillator per sound effect. Silent if the browser has no AudioContext.
+// WebAudio, synthesised. Nothing is loaded from disk, so there are no sample
+// licences to track (claude.md section 4.7) and the build stays dependency-free.
+// Silent if the browser has no AudioContext.
 var actx=null, muted=false;
-function blip(f,d,type){
-  if(muted || typeof window==='undefined') return;
+
+function ctxOrNull(){
+  if(typeof window==='undefined') return null;
   try{
-    if(!actx){ var A=window.AudioContext||window.webkitAudioContext; if(!A) return; actx=new A(); }
+    if(!actx){
+      var A = window.AudioContext||window.webkitAudioContext;
+      if(!A) return null;
+      actx = new A();
+    }
     if(actx.state==='suspended') actx.resume();
-    var o=actx.createOscillator(), g=actx.createGain();
+    return actx;
+  }catch(e){ return null; }
+}
+
+function blip(f,d,type){
+  if(muted) return;
+  var a = ctxOrNull(); if(!a) return;
+  try{
+    var o=a.createOscillator(), g=a.createGain();
     o.type=type||'triangle'; o.frequency.value=f; g.gain.value=0.05;
-    g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime+d);
-    o.connect(g); g.connect(actx.destination); o.start(); o.stop(actx.currentTime+d);
+    g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime+d);
+    o.connect(g); g.connect(a.destination); o.start(); o.stop(a.currentTime+d);
   }catch(e){}
 }
 
-function toggleMute(){ muted = !muted; return muted; }
+/* ---- the scooter ----------------------------------------------------------
+   A Bajaj two-stroke single: a buzzy ring-ding, not a smooth hum. Built from
+   a sawtooth at the firing frequency, a detuned octave above it for the rasp,
+   a square an octave below for the thump, and a little filtered noise for
+   intake roar. A lowpass opens as the revs climb. */
+var eng = null;
+
+function startEngine(){
+  if(eng) return;
+  var a = ctxOrNull(); if(!a) return;
+  try{
+    var out = a.createGain();       out.gain.value = 0;
+    var lp  = a.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=520; lp.Q.value=6;
+
+    var saw  = a.createOscillator(); saw.type='sawtooth';
+    var rasp = a.createOscillator(); rasp.type='sawtooth'; rasp.detune.value = 14;
+    var sub  = a.createOscillator(); sub.type='square';
+
+    var gSaw = a.createGain();  gSaw.gain.value  = 0.55;
+    var gRasp= a.createGain();  gRasp.gain.value = 0.22;
+    var gSub = a.createGain();  gSub.gain.value  = 0.30;
+
+    /* two seconds of white noise, looped, for the intake */
+    var frames = a.sampleRate*2;
+    var buf = a.createBuffer(1, frames, a.sampleRate);
+    var d = buf.getChannelData(0);
+    for(var i=0;i<frames;i++) d[i] = Math.random()*2-1;
+    var noise = a.createBufferSource(); noise.buffer=buf; noise.loop=true;
+    var bp = a.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=760; bp.Q.value=0.7;
+    var gN = a.createGain(); gN.gain.value = 0.06;
+
+    saw.connect(gSaw).connect(lp);
+    rasp.connect(gRasp).connect(lp);
+    sub.connect(gSub).connect(lp);
+    noise.connect(bp).connect(gN).connect(lp);
+    lp.connect(out).connect(a.destination);
+
+    saw.start(); rasp.start(); sub.start(); noise.start();
+    eng = { a:a, out:out, lp:lp, saw:saw, rasp:rasp, sub:sub, noise:noise, level:0 };
+    setEngine(0.35);
+  }catch(e){ eng = null; }
+}
+
+/* load: 0 idling, 1 flat out. Ramped, never stepped, or it clicks. */
+function setEngine(load){
+  if(!eng) return;
+  try{
+    var a = eng.a, now = a.currentTime, k = clamp01(load);
+    var f = 46 + k*58;                        // firing frequency, Hz
+    var vol = muted ? 0 : 0.030 + k*0.028;
+    eng.saw .frequency.setTargetAtTime(f,      now, 0.08);
+    eng.rasp.frequency.setTargetAtTime(f*2.01, now, 0.08);
+    eng.sub .frequency.setTargetAtTime(f*0.5,  now, 0.08);
+    eng.lp  .frequency.setTargetAtTime(380 + k*900, now, 0.10);
+    eng.out .gain     .setTargetAtTime(vol,    now, 0.10);
+    eng.level = k;
+  }catch(e){}
+}
+
+function stopEngine(){
+  if(!eng) return;
+  try{
+    eng.out.gain.setTargetAtTime(0, eng.a.currentTime, 0.08);
+    var e = eng; eng = null;
+    setTimeout(function(){
+      try{ e.saw.stop(); e.rasp.stop(); e.sub.stop(); e.noise.stop(); }catch(x){}
+    }, 400);
+  }catch(e){ eng = null; }
+}
+
+function clamp01(v){ return v<0?0:v>1?1:v; }
+
+function toggleMute(){
+  muted = !muted;
+  if(eng) setEngine(eng.level);      // re-apply, which folds the mute into the gain
+  return muted;
+}
 /* Browsers start the context suspended until the first gesture. */
-function resumeAudio(){ if(actx && actx.state==='suspended') actx.resume(); }
+function resumeAudio(){ ctxOrNull(); }
 
 /* ---- game/throwing.js ---- */
 // Throw timing: which house you are aiming at, and how well you timed it.
@@ -295,12 +636,20 @@ function crash(){
   S.lives--; S.combo=0; S.stun=1.2; S.shake=16;
   callout('CRASH!', C.bad);
   blip(85,.32,'sawtooth');
-  for(var i=0;i<14;i++) S.dust.push({ x:S.px+rnd(-.5,.5), z:S.trackPos+rnd(2.5,5), t:1, r:rnd(0.10,0.22) });
+  for(var i=0;i<14;i++) spawnDust(S.px+rnd(-.5,.5), S.trackPos+rnd(2.5,5), rnd(0.10,0.22));
   if(S.lives<=0){ S.mode='over'; if(S.score>S.best) S.best=S.score; }
 }
 
 /* ---- game/update.js ---- */
-// One simulation step: movement, papers in flight, collisions, end of street.
+// One simulation step: camera, movement, crossings, papers in flight,
+// collisions, end of street.
+
+/* Approach a target with a time-constant instead of a per-frame fraction, so
+   the feel does not change with framerate. rate is "how much of the gap is
+   closed per second". */
+function ease(cur, target, rate, dt){
+  return cur + (target-cur)*(1 - Math.exp(-rate*dt));
+}
 
 function update(dt){
   S.t += dt;
@@ -308,20 +657,41 @@ function update(dt){
   if(S.tutorial>0) S.tutorial -= dt;
   if(S.arm>0) S.arm -= dt;
   if(S.calloutT>0) S.calloutT -= dt;
+  if(S.turnT>0) S.turnT -= dt;
 
-  if(S.mode==='title'){ S.trackPos += S.speed*0.5*dt; return; }
-  if(S.mode!=='play') return;
+  setCamZ(S.trackPos);
+
+  if(S.mode==='title'){
+    S.trackPos += S.speed*0.5*dt;
+    camera(dt, 0);
+    updateDust(dt);
+    return;
+  }
+  if(S.mode!=='play'){ camera(dt, 0); stopEngine(); return; }
   if(S.stun>0) S.stun -= dt;
 
   S.trackPos += S.speed*dt;
 
+  /* Lane change stays as quick as it ever was — slowing it down makes dense
+     streets undodgeable, which the bot caught. The smoothness comes from the
+     lean, the camera lag and the roll, not from sluggish steering. */
   var tx = LANES[S.lane], d = tx - S.px;
-  S.px += d*Math.min(1, dt*12);
-  S.lean += (d*2.0 - S.lean)*Math.min(1, dt*8);
+  S.px = ease(S.px, tx, 13.0, dt);
+  var road = bendHeading(S.trackPos);
+  var wantLean = d*1.9 + road*3.4;
+  S.lean = ease(S.lean, wantLean, 6.5, dt);
+
+  camera(dt, road);
+
+  /* engine note tracks speed, and dips while you are stunned */
+  var load = clamp((S.speed-8.0)/5.0, 0, 1) * (S.stun>0 ? 0.55 : 1);
+  setEngine(0.30 + load*0.70);
 
   var i,o,rel;
 
   for(i=0;i<S.objs.length;i++){ o=S.objs[i]; if(o.kind==='obs'&&o.vz) o.z += o.vz*dt; }
+
+  crossings(dt);
 
   /* papers in flight */
   for(i=S.shots.length-1;i>=0;i--){
@@ -330,7 +700,7 @@ function update(dt){
     s.spin += dt*10;
     if(s.t>=1){
       var puffZ = s.landZ, puffX = s.landX;
-      for(var k=0;k<7;k++) S.dust.push({ x:puffX+rnd(-.15,.15), z:puffZ+rnd(-.15,.15), t:1, r:rnd(0.06,0.13) });
+      for(var k=0;k<7;k++) spawnDust(puffX+rnd(-.15,.15), puffZ+rnd(-.15,.15), rnd(0.06,0.13));
       if(s.grade==='perfect'||s.grade==='hit'){
         if(s.house && !s.house.done){
           s.house.done = true; S.delivered++; S.combo++;
@@ -354,7 +724,16 @@ function update(dt){
   }
 
   for(i=S.pops.length-1;i>=0;i--){ S.pops[i].t -= dt*1.2; if(S.pops[i].t<=0) S.pops.splice(i,1); }
-  for(i=S.dust.length-1;i>=0;i--){ S.dust[i].t -= dt*1.6; if(S.dust[i].t<=0) S.dust.splice(i,1); }
+  updateDust(dt);
+
+  /* junction warning, a beat before the bend */
+  for(i=0;i<S.junctions.length;i++){
+    var j = S.junctions[i];
+    if(!j.warned && j.z - S.trackPos < 34){
+      j.warned = true; S.turnSign = j.H<0 ? -1 : 1; S.turnT = 2.0;
+      blip(520,.10,'sine');
+    }
+  }
 
   /* collisions */
   for(i=0;i<S.objs.length;i++){
@@ -365,8 +744,8 @@ function update(dt){
     } else if(o.kind==='pickup' && !o.checked && rel<0.9){
       o.checked = true;
       if(Math.abs(o.x-S.px) < 0.45){
-        o.taken = true; S.papers += 6; S.score += 40;
-        S.pops.push({ x:o.x, z:o.z, t:1, txt:'+6', col:C.hud });
+        o.taken = true; S.papers += (o.amount||3); S.score += 40;
+        S.pops.push({ x:o.x, z:o.z, t:1, txt:'+'+(o.amount||3), col:C.hud });
         blip(600,.08,'sine');
       }
     } else if(o.kind==='house' && o.target && !o.done && !o.tried && rel < -3){
@@ -389,17 +768,65 @@ function update(dt){
   }
 }
 
+/* ---- camera ---------------------------------------------------------------
+   Three small things that together stop the view feeling nailed down: a bob
+   at engine frequency, a lateral lag so the world slides a beat behind a lane
+   change, and a roll into the bend. The projection still uses the rider's
+   true position — the lag is applied in screen space only, so throwing stays
+   honest. */
+function camera(dt, road){
+  var moving = (S.mode==='play' || S.mode==='title');
+  var bobAmp = moving ? 1.5 + S.speed*0.10 : 0;
+  S.camBob = Math.sin(S.t*S.speed*1.15)*bobAmp + Math.sin(S.t*S.speed*2.3)*bobAmp*0.30;
+  S.camX  = ease(S.camX, S.px, 7.0, dt);
+  S.camRoll = ease(S.camRoll, (road||0)*0.55 + (S.px - S.camX)*0.10, 8.0, dt);
+  var f = FOCAL_BASE * (1 + clamp((S.speed-8.5)*0.016, 0, 0.11));
+  S.focal = f;
+  setFocal(f);
+}
+
+/* ---- crossing hazards -----------------------------------------------------
+   The one rule that matters (claude.md section 4.2): it must telegraph. The
+   dog sits on the verge, then puts its ears up and freezes for a beat, and
+   only then bolts. Anything that crosses without warning is unfair. */
+function crossings(dt){
+  for(var i=0;i<S.objs.length;i++){
+    var o = S.objs[i];
+    if(o.kind!=='cross') continue;
+    var rel = o.z - S.trackPos;
+
+    if(o.phase==='wait'){
+      if(rel < 26 && rel > 0){ o.phase='alert'; o.t=0; }
+    } else if(o.phase==='alert'){
+      o.t += dt;
+      if(o.t > 0.75){ o.phase='run'; o.t=0; blip(1150,.06,'square'); }
+    } else if(o.phase==='run'){
+      o.t += dt;
+      var dir = o.x1 - o.x0;
+      o.x += (dir>0?1:-1) * o.speed * dt;
+      if((dir>0 && o.x>=o.x1) || (dir<0 && o.x<=o.x1)){ o.x = o.x1; o.phase='gone'; }
+    }
+
+    if(!o.checked && rel < 0.9){
+      o.checked = true;
+      if(S.stun<=0 && o.phase!=='gone' && Math.abs(o.x-S.px) < 0.44) crash();
+    }
+  }
+}
+
 /* ---- game/flow.js ---- */
 // Moving between title, play, street-cleared and game-over.
 
 function startGame(){
   S.level=1; S.score=0; S.lives=3; S.failed=false;
   buildLevel(1); S.tutorial=5; S.mode='play';
+  startEngine();
 }
 function nextStreet(){
   if(S.failed){ S.failed=false; buildLevel(S.level); }
-  else { S.level++; buildLevel(S.level); }
+  else { buildLevel(S.level+1); }
   S.mode='play';
+  startEngine();
 }
 function press(){
   resumeAudio();
@@ -407,6 +834,9 @@ function press(){
   else if(S.mode==='clear') nextStreet();
   else if(S.mode==='over') startGame();
 }
+/* Cut the engine when the ride stops, so the title and game-over screens are
+   quiet. update() restarts it on the next press. */
+function idleAudio(){ stopEngine(); }
 
 /* ---- game/input.js ---- */
 // Pointer (swipe to steer, tap a side to throw) and keyboard controls.
@@ -471,30 +901,68 @@ function label(s,x,y,size,col,align,weight){
 
 /* ---- render/background.js ---- */
 // Sky, distant skyline, and the road surface under the rider.
+//
+// The road is drawn as a single filled path sampled down the depth axis
+// rather than one flat quad, because it has to follow the bend through a
+// junction. Gradients are built once and cached — creating them per frame was
+// the biggest avoidable cost in the loop (claude.md section 7).
 
+/* ---- cached gradients ---- */
+var gSky=null, gGround=null, gHaze=null, gHud=null;
+function gradients(){
+  if(gSky) return;
+  gSky = ctx.createLinearGradient(0,0,0,HORIZON);
+  gSky.addColorStop(0,C.skyTop); gSky.addColorStop(.55,C.skyMid);
+  gSky.addColorStop(.85,C.skyLow); gSky.addColorStop(1,C.skyGlow);
+
+  gGround = ctx.createLinearGradient(0,HORIZON,0,DH);
+  gGround.addColorStop(0,C.field2); gGround.addColorStop(1,C.field);
+
+  gHaze = ctx.createLinearGradient(0,HORIZON-6,0,HORIZON+96);
+  gHaze.addColorStop(0,C.haze); gHaze.addColorStop(.45,'rgba(232,220,196,0.62)');
+  gHaze.addColorStop(1,'rgba(232,220,196,0)');
+
+  gHud = ctx.createLinearGradient(0,0,0,96);
+  gHud.addColorStop(0,'rgba(10,16,26,0.55)'); gHud.addColorStop(1,'rgba(10,16,26,0)');
+}
+function invalidateGradients(){ gSky=gGround=gHaze=gHud=null; }
+function hudGradient(){ gradients(); return gHud; }
+function hazeGradient(){ gradients(); return gHaze; }
+
+/* ---- sky ---- */
 function drawSky(){
-  var g = ctx.createLinearGradient(0,0,0,HORIZON);
-  g.addColorStop(0,C.skyTop); g.addColorStop(.6,C.skyMid); g.addColorStop(1,C.skyLow);
-  ctx.fillStyle=g; ctx.fillRect(0,0,DW,HORIZON);
-  circle(298,150,40,'rgba(255,243,198,0.45)'); circle(298,150,25,C.sun);
-  ctx.globalAlpha=.8; cloud(70,56,34); cloud(196,36,26); cloud(340,78,22); ctx.globalAlpha=1;
-  /* a couple of birds */
-  ctx.strokeStyle='rgba(40,60,75,0.45)'; ctx.lineWidth=1.6;
-  for(var i=0;i<3;i++){
-    var bx = 110+i*34 + Math.sin(S.t*0.5+i)*8, by = 96+i*9;
+  gradients();
+  ctx.fillStyle=gSky; ctx.fillRect(0,0,DW,HORIZON);
+
+  /* low morning sun, sitting just above the haze */
+  var sy = HORIZON-46;
+  circle(300,sy,62,C.sunHalo);
+  circle(300,sy,34,'rgba(255,222,150,0.55)');
+  circle(300,sy,21,C.sun);
+
+  ctx.globalAlpha=.7; cloud(70,56,34); cloud(196,38,26); cloud(340,86,20); ctx.globalAlpha=1;
+
+  /* birds out early */
+  ctx.strokeStyle='rgba(50,54,62,0.40)'; ctx.lineWidth=1.6;
+  for(var i=0;i<4;i++){
+    var bx = 96+i*32 + Math.sin(S.t*0.5+i)*9, by = 92+i*8;
     ctx.beginPath();
     ctx.moveTo(bx-6,by); ctx.quadraticCurveTo(bx-3,by-4,bx,by);
     ctx.quadraticCurveTo(bx+3,by-4,bx+6,by); ctx.stroke();
   }
 }
 function cloud(x,y,r){
-  circle(x,y,r*.62,'#fff'); circle(x+r*.6,y+r*.12,r*.46,'#fff'); circle(x-r*.6,y+r*.16,r*.4,'#fff');
-  ctx.fillStyle='#fff'; ctx.fillRect(x-r*.6,y,r*1.2,r*.5);
+  circle(x,y,r*.62,'rgba(255,246,232,0.92)');
+  circle(x+r*.6,y+r*.12,r*.46,'rgba(255,242,222,0.92)');
+  circle(x-r*.6,y+r*.16,r*.4,'rgba(255,238,214,0.92)');
+  ctx.fillStyle='rgba(255,244,228,0.92)'; ctx.fillRect(x-r*.6,y,r*1.2,r*.5);
 }
+
+/* ---- distant skyline ---- */
 function drawSkyline(){
   var off = -(S.trackPos*1.4)%440;
   for(var pass=0;pass<2;pass++){
-    ctx.save(); ctx.translate(off+pass*440,0); ctx.globalAlpha=.45;
+    ctx.save(); ctx.translate(off+pass*440,0); ctx.globalAlpha=.42;
     ctx.fillStyle=C.far2;
     ctx.fillRect(14,HORIZON-30,52,30); ctx.fillRect(74,HORIZON-19,34,19);
     ctx.fillRect(256,HORIZON-26,58,26); ctx.fillRect(372,HORIZON-18,44,18);
@@ -508,6 +976,11 @@ function drawSkyline(){
     ctx.fillStyle=C.far2;
     ctx.fillRect(320,HORIZON-50,28,15);
     ctx.fillRect(325,HORIZON-35,4,35); ctx.fillRect(340,HORIZON-35,4,35);
+    /* chimney with a thread of morning smoke */
+    ctx.fillRect(60,HORIZON-46,7,46);
+    ctx.globalAlpha=.18;
+    circle(64,HORIZON-54,7,'#fff'); circle(69,HORIZON-66,9,'#fff'); circle(62,HORIZON-80,11,'#fff');
+    ctx.globalAlpha=.42;
     palm(236,HORIZON,30); palm(100,HORIZON,24);
     ctx.restore();
   }
@@ -523,58 +996,105 @@ function palm(x,ground,h){
     ctx.stroke();
   }
 }
-function drawGround(){
-  var g = ctx.createLinearGradient(0,HORIZON,0,DH);
-  g.addColorStop(0,C.field2); g.addColorStop(1,C.field);
-  ctx.fillStyle=g; ctx.fillRect(0,HORIZON,DW,DH-HORIZON);
 
-  var zF=70, zN=1.25;
-  var yF=yAt(zF), yN=yAt(zN), pF=ppuAt(zF), pN=ppuAt(zN);
-  var cF=DW/2-S.px*pF, cN=DW/2-S.px*pN;
+/* ---- the road -------------------------------------------------------------
+   Sampled geometrically so the slices bunch up near the rider where the
+   perspective changes fastest. Everything goes through sxAt(), which folds in
+   the road's curvature, so the strip bends through a junction on its own. */
+var Z_NEAR = 1.25, Z_FAR = 96, SLICES = 34;
+var zs = (function(){
+  var a = new Float64Array(SLICES+1), r = Math.pow(Z_FAR/Z_NEAR, 1/SLICES);
+  for(var i=0;i<=SLICES;i++) a[i] = Z_NEAR*Math.pow(r,i);
+  return a;
+})();
 
-  poly([[cF-(ROAD_HALF+.55)*pF,yF],[cF+(ROAD_HALF+.55)*pF,yF],
-        [cN+(ROAD_HALF+.55)*pN,yN],[cN-(ROAD_HALF+.55)*pN,yN]], C.shoulder);
-  poly([[cF-ROAD_HALF*pF,yF],[cF+ROAD_HALF*pF,yF],
-        [cN+ROAD_HALF*pN,yN],[cN-ROAD_HALF*pN,yN]], C.road);
-
-  /* tar patches */
-  ctx.save();
+function ribbon(half){
   ctx.beginPath();
-  ctx.moveTo(cF-ROAD_HALF*pF,yF); ctx.lineTo(cF+ROAD_HALF*pF,yF);
-  ctx.lineTo(cN+ROAD_HALF*pN,yN); ctx.lineTo(cN-ROAD_HALF*pN,yN); ctx.closePath(); ctx.clip();
+  var i, z;
+  for(i=0;i<=SLICES;i++){ z=zs[i]; ctx.lineTo(sxAt(-half,z,S.px), yAt(z)); }
+  for(i=SLICES;i>=0;i--){ z=zs[i]; ctx.lineTo(sxAt( half,z,S.px), yAt(z)); }
+  ctx.closePath();
+}
+
+function drawGround(){
+  gradients();
+  ctx.fillStyle=gGround; ctx.fillRect(0,HORIZON,DW,DH-HORIZON);
+
+  ribbon(ROAD_HALF+0.55); ctx.fillStyle=C.shoulder; ctx.fill();
+  ribbon(ROAD_HALF);      ctx.fillStyle=C.road;     ctx.fill();
+
+  drawJunctions();
+
+  /* tar patches, clipped to the road */
+  ctx.save();
+  ribbon(ROAD_HALF); ctx.clip();
   var phase=S.trackPos%9;
   for(var k=0;k<10;k++){
     var z=2+k*9-phase; if(z<1.4) continue;
-    var y=yAt(z), p=ppuAt(z), c=DW/2-S.px*p;
-    ctx.globalAlpha=.45; ctx.fillStyle=(k%2)?C.roadLite:C.patch;
+    var y=yAt(z), p=ppuAt(z), c=sxAt(0,z,S.px);
+    ctx.globalAlpha=.42; ctx.fillStyle=(k%2)?C.roadLite:C.patch;
     ctx.beginPath(); ctx.ellipse(c+Math.sin(k*2.3)*p*.5, y, p*.6, Math.max(2,p*.08),0,0,6.2832); ctx.fill();
   }
   ctx.globalAlpha=1; ctx.restore();
 
-  var hz = ctx.createLinearGradient(0,HORIZON,0,HORIZON+66);
-  hz.addColorStop(0,'rgba(220,239,244,0.8)'); hz.addColorStop(1,'rgba(220,239,244,0)');
-  ctx.fillStyle=hz; ctx.fillRect(0,HORIZON,DW,66);
-
   dashes(-0.40); dashes(0.40);
   edge(-ROAD_HALF+0.06); edge(ROAD_HALF-0.06);
 }
+
+/* A side street crossing the round, with the tarmac worn pale where the two
+   meet. Drawn on the ground, under everything else. */
+function drawJunctions(){
+  for(var i=0;i<S.junctions.length;i++){
+    var j = S.junctions[i];
+    var z0 = j.z - S.trackPos - 2.2, z1 = j.z - S.trackPos + 2.2;
+    if(z1 < 1.4 || z0 > Z_FAR) continue;
+    z0 = Math.max(z0, 1.4);
+    var W = 7.5;
+    poly([[sxAt(-W,z0,S.px), yAt(z0)], [sxAt(W,z0,S.px), yAt(z0)],
+          [sxAt(W,z1,S.px), yAt(z1)], [sxAt(-W,z1,S.px), yAt(z1)]], C.road);
+    /* pale wear where traffic turns */
+    var zm = (z0+z1)/2, p = ppuAt(zm);
+    ctx.globalAlpha=.22; ctx.fillStyle=C.roadLite;
+    ctx.beginPath();
+    ctx.ellipse(sxAt(0,zm,S.px), yAt(zm), p*2.4, Math.max(2,p*0.5), 0, 0, 6.2832);
+    ctx.fill(); ctx.globalAlpha=1;
+  }
+}
+
 function dashes(xo){
   var phase=S.trackPos%7;
   for(var k=0;k<14;k++){
     var z0=1.8+k*7-phase, z1=z0+3.4;
-    if(z1<1.4) continue; if(z0>66) break;
+    if(z1<1.4) continue; if(z0>Z_FAR*0.72) break;
     z0=Math.max(z0,1.4);
     var y0=yAt(z0),y1=yAt(z1),p0=ppuAt(z0),p1=ppuAt(z1);
-    var c0=DW/2-S.px*p0, c1=DW/2-S.px*p1;
+    var c0=sxAt(xo,z0,S.px), c1=sxAt(xo,z1,S.px);
     var w0=Math.max(.7,p0*.016), w1=Math.max(.4,p1*.016);
-    poly([[c0+xo*p0-w0,y0],[c0+xo*p0+w0,y0],[c1+xo*p1+w1,y1],[c1+xo*p1-w1,y1]],'rgba(239,226,173,0.6)');
+    poly([[c0-w0,y0],[c0+w0,y0],[c1+w1,y1],[c1-w1,y1]],'rgba(239,226,173,0.55)');
   }
 }
+
 function edge(x){
-  var zF=64,zN=1.4, yF=yAt(zF),yN=yAt(zN),pF=ppuAt(zF),pN=ppuAt(zN);
-  var cF=DW/2-S.px*pF, cN=DW/2-S.px*pN;
-  poly([[cF+x*pF-.6,yF],[cF+x*pF+.6,yF],[cN+x*pN+3,yN],[cN+x*pN-3,yN]],'rgba(255,255,255,0.32)');
+  ctx.beginPath();
+  for(var i=0;i<=SLICES;i++){
+    var z=zs[i]; if(z>Z_FAR*0.70) break;
+    ctx.lineTo(sxAt(x,z,S.px), yAt(z));
+  }
+  ctx.strokeStyle='rgba(255,255,255,0.30)';
+  ctx.lineWidth=2.2; ctx.lineJoin='round';
+  ctx.stroke();
 }
+
+/* Warm mist over everything past mid-distance. Painted by scene.js partway
+   through the depth-sorted pass, so far scenery emerges from it instead of
+   popping in at the draw distance. */
+function drawHaze(){
+  gradients();
+  ctx.fillStyle=gHaze; ctx.fillRect(0,HORIZON-6,DW,102);
+}
+
+{ drawSky, drawSkyline, drawGround, drawHaze, hudGradient, hazeGradient,
+         invalidateGradients, Z_FAR };
 
 /* ---- render/houses.js ---- */
 // The frontage: houses, shops, compound walls, and the pin over a house on the round.
@@ -685,6 +1205,157 @@ function drawPin(x,y,p,done){
   }
 }
 
+/* ---- render/landmarks.js ---- */
+// Civic buildings along the round: a temple, a school, a government office.
+// None of them are ever on the delivery round — they are there so the street
+// has landmarks and the ride stops feeling like one repeating house.
+
+function drawLandmark(o, rel){
+  var p=ppuAt(rel), y=yAt(rel), cx=sxAt(o.x,rel,S.px);
+  var w=o.w*p, h=o.h*p;
+  if(cx+w < -80 || cx-w > DW+80) return;
+
+  /* ground shadow */
+  ctx.globalAlpha=.16;
+  ctx.beginPath(); ctx.ellipse(cx,y,w*.55,Math.max(2,p*.05),0,0,6.2832); ctx.fillStyle='#000'; ctx.fill();
+  ctx.globalAlpha=1;
+
+  if(o.type==='temple')      temple(o,cx,y,w,h,p);
+  else if(o.type==='school') school(o,cx,y,w,h,p);
+  else                       govt(o,cx,y,w,h,p);
+
+  /* the low sun catches the east face of everything */
+  ctx.globalAlpha=.18;
+  ctx.fillStyle=C.warm;
+  ctx.fillRect(o.side>0?cx-w/2:cx+w*.14, y-h, w*.36, h);
+  ctx.globalAlpha=1;
+}
+
+/* ---- temple: plinth, steps, shikhara, kalash, saffron flag ---- */
+function temple(o,cx,y,w,h,p){
+  var x0=cx-w/2, y0=y-h;
+
+  /* plinth and steps */
+  fillRR(x0-w*.10, y-h*.16, w*1.20, h*.16, p*.01, '#d8cbb0');
+  ctx.fillStyle='rgba(0,0,0,0.10)';
+  for(var s=0;s<3;s++) ctx.fillRect(cx-w*.24+s*w*.02, y-h*.05+s*h*.02, w*.48-s*w*.04, Math.max(1,h*.02));
+
+  /* body */
+  fillRR(x0, y0+h*.34, w, h*.50, p*.012, C.temple);
+  ctx.fillStyle='rgba(0,0,0,0.08)';
+  ctx.fillRect(o.side>0?x0:x0+w*.76, y0+h*.34, w*.24, h*.50);
+
+  /* shikhara — the stepped tower */
+  var tw=w*.62, tx=cx-tw/2, ty=y0+h*.34;
+  for(var i=0;i<5;i++){
+    var f=i/5, ww=tw*(1-f*0.62), hh=h*.075;
+    fillRR(cx-ww/2, ty-h*.075*(i+1), ww, hh, p*.008, i%2 ? C.temple : '#e6d3b0');
+  }
+  /* kalash finial */
+  var ky = ty-h*.375;
+  circle(cx, ky-p*.05, Math.max(2,p*.045), C.templeGold);
+  ctx.fillStyle=C.templeGold; ctx.fillRect(cx-Math.max(1,p*.008), ky-p*.14, Math.max(2,p*.016), p*.10);
+
+  /* saffron pennant */
+  var flut=Math.sin(S.t*3+o.seed)*p*.03;
+  poly([[cx+p*.012,ky-p*.14],[cx+p*.20+flut,ky-p*.10],[cx+p*.012,ky-p*.05]], C.saffron);
+
+  /* doorway and trim band */
+  fillRR(cx-w*.12, y-h*.34, w*.24, h*.34, p*.012, C.templeTrim);
+  fillRR(cx-w*.08, y-h*.28, w*.16, h*.28, p*.010, '#5a3524');
+  ctx.fillStyle=C.templeTrim;
+  ctx.fillRect(x0, y0+h*.34, w, Math.max(1.5,h*.035));
+
+  /* bell hanging in the porch */
+  var bx=cx-w*.30, by=y-h*.46;
+  ctx.strokeStyle='#8d8577'; ctx.lineWidth=Math.max(1,p*.008);
+  ctx.beginPath(); ctx.moveTo(bx,by-p*.10); ctx.lineTo(bx,by); ctx.stroke();
+  ctx.beginPath(); ctx.arc(bx,by,Math.max(2,p*.05),Math.PI,0); ctx.fillStyle=C.templeGold; ctx.fill();
+}
+
+/* ---- school: long block, tricolour on a pole, painted board, boundary wall ---- */
+function school(o,cx,y,w,h,p){
+  var x0=cx-w/2, y0=y-h;
+
+  fillRR(x0, y0, w, h, p*.012, C.school);
+  ctx.fillStyle='rgba(0,0,0,0.08)';
+  ctx.fillRect(o.side>0?x0:x0+w*.80, y0, w*.20, h);
+
+  /* flat roof with a parapet */
+  fillRR(x0-w*.03, y0-h*.07, w*1.06, h*.08, p*.008, C.schoolTrim);
+
+  /* a row of classroom windows */
+  var n=6, wy=y0+h*.26, ww=w*.10, wh=h*.24;
+  for(var i=0;i<n;i++){
+    var wx = x0 + w*.08 + i*(w*.84/n);
+    fillRR(wx, wy, ww, wh, p*.006, '#a9c4d0');
+    ctx.strokeStyle='rgba(0,0,0,0.18)'; ctx.lineWidth=Math.max(1,p*.006);
+    ctx.beginPath(); ctx.moveTo(wx+ww/2,wy); ctx.lineTo(wx+ww/2,wy+wh); ctx.stroke();
+  }
+
+  /* verandah posts */
+  ctx.fillStyle='#d8cdb4';
+  for(var q=0;q<4;q++) ctx.fillRect(x0+w*.10+q*w*.26, y-h*.28, Math.max(1.5,w*.022), h*.28);
+
+  /* painted name board */
+  fillRR(x0+w*.20, y0+h*.60, w*.60, h*.14, p*.008, C.schoolTrim);
+  ctx.fillStyle='rgba(255,255,255,0.85)';
+  ctx.fillRect(x0+w*.25, y0+h*.645, w*.50, Math.max(1.5,h*.030));
+
+  /* flagpole with the tricolour */
+  var fx = cx + w*.40*(o.side>0?-1:1), fh=h*1.05;
+  ctx.fillStyle='#b9b2a4'; ctx.fillRect(fx-Math.max(1,p*.008), y-fh, Math.max(2,p*.016), fh);
+  var fw=p*.30, fhh=p*.20, wave=Math.sin(S.t*2.6+o.seed)*p*.02;
+  fillRR(fx, y-fh, fw, fhh/3, 0, C.saffron);
+  fillRR(fx, y-fh+fhh/3+wave*0, fw, fhh/3, 0, '#ffffff');
+  fillRR(fx, y-fh+fhh*2/3, fw, fhh/3, 0, C.green);
+  circle(fx+fw*.5, y-fh+fhh*.5, Math.max(1,fhh*.10), C.chakra);
+
+  /* boundary wall and gate */
+  fillRR(cx-w*.56, y-h*.18, w*1.12, h*.18, p*.006, '#ddd2ba');
+  ctx.fillStyle='rgba(0,0,0,0.14)';
+  for(var g=0;g<5;g++) ctx.fillRect(cx-w*.14+g*w*.07, y-h*.18, Math.max(.8,p*.006), h*.18);
+}
+
+/* ---- government office: plain sarkari block, tricolour band, board ---- */
+function govt(o,cx,y,w,h,p){
+  var x0=cx-w/2, y0=y-h;
+
+  fillRR(x0, y0, w, h, p*.008, C.govt);
+  ctx.fillStyle='rgba(0,0,0,0.09)';
+  ctx.fillRect(o.side>0?x0:x0+w*.78, y0, w*.22, h);
+
+  /* deep roof slab */
+  fillRR(x0-w*.05, y0-h*.09, w*1.10, h*.10, p*.006, '#c4bba6');
+
+  /* two storeys of identical windows, because it is a government office */
+  for(var row=0; row<2; row++){
+    for(var i=0;i<5;i++){
+      var wx = x0 + w*.09 + i*(w*.82/5), wy = y0 + h*(0.20 + row*0.34);
+      fillRR(wx, wy, w*.09, h*.20, p*.005, '#9fb3bc');
+      ctx.fillStyle='rgba(255,255,255,0.30)';
+      ctx.fillRect(wx, wy, w*.09, Math.max(1,h*.03));
+    }
+  }
+
+  /* tricolour band over the entrance */
+  var bw=w*.52, bx=cx-bw/2, by=y0+h*.80;
+  fillRR(bx, by, bw, h*.035, 0, C.saffron);
+  fillRR(bx, by+h*.035, bw, h*.035, 0, '#ffffff');
+  fillRR(bx, by+h*.070, bw, h*.035, 0, C.green);
+
+  /* board and doorway */
+  fillRR(bx, y0+h*.62, bw, h*.13, p*.006, C.govtTrim);
+  ctx.fillStyle='rgba(255,255,255,0.80)';
+  ctx.fillRect(bx+bw*.08, y0+h*.665, bw*.84, Math.max(1.5,h*.028));
+  fillRR(cx-w*.10, y-h*.30, w*.20, h*.30, p*.008, '#6d5a44');
+
+  /* a couple of parked cycles and a notice board */
+  circle(cx-w*.34, y-p*.05, p*.055, '#3a3a3a');
+  circle(cx-w*.26, y-p*.05, p*.055, '#3a3a3a');
+  fillRR(cx+w*.28, y-h*.22, w*.12, h*.16, p*.006, '#8d8577');
+}
+
 /* ---- render/props.js ---- */
 // Verge dressing: poles, trees, hoardings, hand pumps, chai stalls, dogs, bunting.
 
@@ -754,6 +1425,10 @@ function drawProp(o,rel){
     circle(cx+sw*.30, y-p*.06, p*.06, '#6b5540');
     return;
   }
+  if(o.type==='hawker'){
+    drawHawker(o,cx,y,p);
+    return;
+  }
   if(o.type==='dog'){
     var trot = Math.sin(S.t*6+o.seed);
     var dw=0.42*p, dh=0.26*p, dy=y-dh;
@@ -768,6 +1443,89 @@ function drawProp(o,rel){
     ctx.stroke(); ctx.lineCap='butt';
     return;
   }
+}
+
+/* ---- hawkers ---------------------------------------------------------------
+   The street is already awake: a sabziwala behind his cart, a fruit seller
+   with a head-load basket, the milkman with his cans, and someone selling
+   brooms. They sway and call out; none of them are in the road. */
+function drawHawker(o,cx,y,p){
+  var sway = Math.sin(S.t*1.8+o.seed)*p*.012;
+  var face = o.x>0 ? -1 : 1;                 // they face the road
+  var kurta = pick2(o.seed, ['#dcd3c0','#cfe0ea','#e6d2c2','#d4e0cf','#efe3c8']);
+  var hh = 0.92*p;                           // person height in pixels
+
+  if(o.hawker==='sabzi'){
+    /* handcart of vegetables */
+    var cw=p*.66, ch=p*.24, cy=y-ch-p*.08;
+    circle(cx-cw*.30, y-p*.07, p*.075, '#3a3a3a');
+    circle(cx+cw*.30, y-p*.07, p*.075, '#3a3a3a');
+    fillRR(cx-cw/2, cy, cw, ch, p*.02, '#a9713e');
+    var veg=['#4f8f3a','#e2483d','#6cbf46','#f0a92a','#8e5fb0','#4f8f3a'];
+    for(var i=0;i<6;i++) circle(cx-cw*.36+i*cw*.145, cy-p*.03, p*.045, veg[i]);
+    person(cx-cw*.62, y, hh, kurta, face, sway, o.seed);
+    return;
+  }
+  if(o.hawker==='fruit'){
+    /* basket carried on the head */
+    person(cx, y, hh, kurta, face, sway, o.seed);
+    var by=y-hh-p*.05;
+    fillRR(cx-p*.17+sway, by-p*.09, p*.34, p*.10, p*.02, '#c8a262');
+    circle(cx-p*.08+sway, by-p*.11, p*.045, '#f0a92a');
+    circle(cx+p*.02+sway, by-p*.12, p*.045, '#e2483d');
+    circle(cx+p*.10+sway, by-p*.10, p*.040, '#6cbf46');
+    return;
+  }
+  if(o.hawker==='milk'){
+    /* cycle with milk cans slung either side */
+    var wr=p*.10;
+    circle(cx-p*.24, y-wr, wr, '#2b2b2b');
+    circle(cx+p*.24, y-wr, wr, '#2b2b2b');
+    ctx.strokeStyle='#5a6b7a'; ctx.lineWidth=Math.max(1.5,p*.018);
+    ctx.beginPath();
+    ctx.moveTo(cx-p*.24,y-wr); ctx.lineTo(cx,y-p*.30); ctx.lineTo(cx+p*.24,y-wr);
+    ctx.moveTo(cx,y-p*.30); ctx.lineTo(cx-p*.04,y-p*.52);
+    ctx.stroke();
+    fillRR(cx-p*.30, y-p*.34, p*.15, p*.22, p*.02, '#b9c3c8');
+    fillRR(cx+p*.16, y-p*.34, p*.15, p*.22, p*.02, '#b9c3c8');
+    person(cx-p*.02, y, hh*.92, kurta, face, sway, o.seed);
+    return;
+  }
+  /* broom seller: a bundle over the shoulder */
+  person(cx, y, hh, kurta, face, sway, o.seed);
+  ctx.strokeStyle='#b08040'; ctx.lineWidth=Math.max(1.5,p*.016);
+  ctx.beginPath();
+  ctx.moveTo(cx-p*.20+sway, y-hh*.52); ctx.lineTo(cx+p*.24+sway, y-hh*.86);
+  ctx.stroke();
+  ctx.strokeStyle='#d8c489'; ctx.lineWidth=Math.max(1,p*.010);
+  for(var b=0;b<5;b++){
+    ctx.beginPath();
+    ctx.moveTo(cx+p*.22+sway, y-hh*.84);
+    ctx.lineTo(cx+p*.34+sway+b*p*.012, y-hh*.96-b*p*.008);
+    ctx.stroke();
+  }
+}
+
+/* A single flat-vector figure — head, torso, legs. Deliberately simple: at
+   this scale anything more reads as noise. */
+function person(x, ground, h, kurta, face, sway, seed){
+  var skin='#c98a5e';
+  /* legs */
+  ctx.fillStyle='#6f7a86';
+  ctx.fillRect(x-h*.10, ground-h*.42, h*.08, h*.42);
+  ctx.fillRect(x+h*.02, ground-h*.42, h*.08, h*.42);
+  /* torso */
+  fillRR(x-h*.15+sway, ground-h*.80, h*.30, h*.42, h*.06, kurta);
+  /* arm nearest the road */
+  ctx.strokeStyle=skin; ctx.lineWidth=Math.max(1.5,h*.07); ctx.lineCap='round';
+  ctx.beginPath();
+  ctx.moveTo(x+face*h*.12+sway, ground-h*.72);
+  ctx.lineTo(x+face*h*.22+sway, ground-h*.50+Math.sin(seed+ground*0.01)*h*.03);
+  ctx.stroke(); ctx.lineCap='butt';
+  /* head */
+  circle(x+sway, ground-h*.90, h*.11, skin);
+  ctx.fillStyle='#2a2320';
+  ctx.beginPath(); ctx.arc(x+sway, ground-h*.93, h*.11, Math.PI, 0); ctx.fill();
 }
 
 /* bunting strung across the street */
@@ -890,6 +1648,102 @@ function drawObstacle(o,rel){
   return;
 }
 
+/* ---- render/crossings.js ---- */
+// Hazards that move into your lane.
+//
+// The telegraph is the whole design (claude.md section 4.2): the dog waits on
+// the verge, then freezes with its ears up and a marker over it for a beat,
+// and only then bolts. If you can be hit without warning, the hazard is a bug.
+
+function drawCrossing(o, rel){
+  if(o.phase==='gone') return;
+  var p=ppuAt(rel), y=yAt(rel), cx=sxAt(o.x,rel,S.px);
+
+  /* shadow */
+  ctx.globalAlpha=.22;
+  ctx.beginPath(); ctx.ellipse(cx,y,p*.22,Math.max(1.5,p*.05),0,0,6.2832); ctx.fillStyle='#000'; ctx.fill();
+  ctx.globalAlpha=1;
+
+  var alert = (o.phase==='alert');
+  var running = (o.phase==='run');
+  dog(o, cx, y, p, alert, running);
+
+  /* the tell: a pulsing warning over the dog while it is about to bolt */
+  if(alert){
+    var pulse = .5+.5*Math.sin(S.t*14);
+    var wy = y - p*.62;
+    ctx.globalAlpha = 0.55+0.45*pulse;
+    poly([[cx, wy-p*.22],[cx+p*.17, wy+p*.06],[cx-p*.17, wy+p*.06]], C.bad);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle='#fff';
+    ctx.fillRect(cx-Math.max(1,p*.014), wy-p*.13, Math.max(2,p*.028), p*.11);
+    ctx.fillRect(cx-Math.max(1,p*.014), wy+p*.005, Math.max(2,p*.028), Math.max(1.5,p*.024));
+    /* a low arc showing which way it is about to go */
+    ctx.strokeStyle='rgba(232,80,58,'+(0.35+0.35*pulse)+')';
+    ctx.lineWidth=Math.max(1.5,p*.018);
+    ctx.beginPath();
+    ctx.moveTo(cx, y+p*.02);
+    ctx.lineTo(cx - o.from*p*.55, y+p*.02);
+    ctx.stroke();
+  }
+}
+
+function dog(o, cx, y, p, alert, running){
+  var trot = running ? Math.sin(S.t*22+o.seed) : Math.sin(S.t*5+o.seed)*0.4;
+  var dw=0.46*p, dh=0.28*p, dy=y-dh;
+  var facing = running ? (o.x1>o.x0 ? 1 : -1) : -Math.sign(o.x || 1);
+
+  /* body */
+  fillRR(cx-dw/2, dy, dw, dh*.72, p*.03, '#c99a63');
+  /* haunches */
+  fillRR(cx-facing*dw*.34, dy+dh*.04, dw*.30, dh*.60, p*.025, '#bf8e58');
+  /* head */
+  fillRR(cx+facing*dw*.26, dy-dh*.44, dw*.30, dh*.48, p*.02, '#c99a63');
+  /* snout */
+  fillRR(cx+facing*dw*.46, dy-dh*.22, dw*.16, dh*.16, p*.015, '#b1834f');
+
+  /* ears — flat when dozing, up when it has seen you */
+  ctx.fillStyle='#a87a48';
+  var ex = cx+facing*dw*.30, ey = dy-dh*.44;
+  if(alert || running){
+    poly([[ex, ey],[ex-facing*p*.02, ey-p*.11],[ex+facing*p*.06, ey-p*.02]], '#a87a48');
+    poly([[ex+facing*p*.10, ey],[ex+facing*p*.10, ey-p*.10],[ex+facing*p*.16, ey-p*.01]], '#a87a48');
+  } else {
+    fillRR(ex-p*.01, ey+p*.01, p*.08, p*.035, p*.01, '#a87a48');
+  }
+
+  /* legs */
+  ctx.fillStyle='#b1834f';
+  var lift = running ? p*.05 : p*.012;
+  ctx.fillRect(cx-dw*.36, dy+dh*.60, dw*.11, dh*.46+trot*lift);
+  ctx.fillRect(cx-dw*.18, dy+dh*.60, dw*.11, dh*.46-trot*lift);
+  ctx.fillRect(cx+dw*.10, dy+dh*.60, dw*.11, dh*.46-trot*lift);
+  ctx.fillRect(cx+dw*.26, dy+dh*.60, dw*.11, dh*.46+trot*lift);
+
+  /* tail */
+  ctx.strokeStyle='#c99a63'; ctx.lineWidth=Math.max(1.5,p*.022); ctx.lineCap='round';
+  var tw = running ? Math.sin(S.t*26+o.seed)*p*.05 : Math.sin(S.t*3+o.seed)*p*.03;
+  ctx.beginPath();
+  ctx.moveTo(cx-facing*dw*.48, dy+dh*.16);
+  ctx.quadraticCurveTo(cx-facing*dw*.70, dy-dh*.20+tw, cx-facing*dw*.62, dy-dh*.52);
+  ctx.stroke(); ctx.lineCap='butt';
+
+  /* eye */
+  circle(cx+facing*dw*.40, dy-dh*.30, Math.max(1,p*.018), C.ink);
+
+  /* speed streaks while it is crossing */
+  if(running){
+    ctx.strokeStyle='rgba(255,255,255,0.35)'; ctx.lineWidth=Math.max(1,p*.012);
+    for(var i=0;i<3;i++){
+      var sy2 = dy+dh*(0.1+i*0.28);
+      ctx.beginPath();
+      ctx.moveTo(cx-facing*(dw*.55+p*.06), sy2);
+      ctx.lineTo(cx-facing*(dw*.55+p*.24+i*p*.04), sy2);
+      ctx.stroke();
+    }
+  }
+}
+
 /* ---- render/effects.js ---- */
 // Paper bundles on the road, dust puffs, and a paper in flight.
 
@@ -948,12 +1802,19 @@ function drawShot(s){
 /* ---- render/rider.js ---- */
 // The rider, drawn from behind: bike, basket, handlebar, mirrors and arms.
 
+/* How much of the screen the scooter is allowed to take. claude.md section 3
+   wants the basket under a quarter of the visible height; at 0.80 the whole
+   assembly tops out around 165px of 700, which also makes the view read as
+   what it is — first person, over the handlebar. */
+var RIDER_K = 0.80;
+
 function drawRider(){
   var lean=clamp(S.lean,-.9,.9);
   var wob=Math.sin(S.t*10)*1.2 + (S.stun>0?Math.sin(S.t*40)*7:0);
   ctx.save();
   ctx.translate(DW/2 + lean*34 + wob, DH);
   ctx.rotate(lean*0.05);
+  ctx.scale(RIDER_K, RIDER_K);
 
   ctx.globalAlpha=.22;
   ctx.beginPath(); ctx.ellipse(0,-4,124,22,0,0,6.2832); ctx.fillStyle='#000'; ctx.fill();
@@ -972,7 +1833,7 @@ function drawRider(){
   circle(0,-78,9,'#22303d'); circle(0,-78,5,'#8fa3b3');
 
   /* basket of papers */
-  var bw=136, bh=58, by=-198;
+  var bw=132, bh=50, by=-188;
   var stack = clamp(Math.ceil(S.papers/3),0,6);
   for(var i=0;i<stack;i++){
     var spread = stack>1 ? (bw*0.66/(stack-1)) : 0;
@@ -1031,8 +1892,8 @@ function drawArm(side, t){
   ctx.lineCap='butt';
   /* fist */
   ctx.save(); ctx.translate(x,y); ctx.rotate(side*(0.12+swing*0.7));
-  fillRR(-19,-15,38,27,12,'#c98a5e');
-  ctx.fillStyle='rgba(0,0,0,0.10)'; ctx.fillRect(-19,-2,38,4);
+  fillRR(-22,-17,44,31,13,'#c98a5e');
+  ctx.fillStyle='rgba(0,0,0,0.10)'; ctx.fillRect(-22,-3,44,5);
   ctx.restore();
 }
 function mirror(x,y,dir){
@@ -1052,9 +1913,7 @@ function mirror(x,y,dir){
 // Score, lives, paper count, progress, and the two throw-timing gauges.
 
 function drawHUD(){
-  var g=ctx.createLinearGradient(0,0,0,96);
-  g.addColorStop(0,'rgba(10,16,26,0.55)'); g.addColorStop(1,'rgba(10,16,26,0)');
-  ctx.fillStyle=g; ctx.fillRect(0,0,DW,96);
+  ctx.fillStyle=hudGradient(); ctx.fillRect(0,0,DW,96);
 
   label('LEVEL '+S.level,16,30,15,C.hudDim,'left','700');
   label(String(S.score),16,58,26,C.hud,'left','800');
@@ -1070,6 +1929,13 @@ function drawHUD(){
     ctx.fillStyle='#43535e'; rr(hx-9,hy-6,18,6,3); ctx.fill();
   }
 
+  var low = S.papers <= 2;
+  if(low){
+    var lp = .5+.5*Math.sin(S.t*8);
+    ctx.globalAlpha = .35+.45*lp;
+    fillRR(12,76,104,38,19,C.bad);
+    ctx.globalAlpha = 1;
+  }
   fillRR(16,80,96,30,15,'rgba(10,16,26,0.5)');
   fillRR(26,89,20,13,3,C.paper);
   ctx.fillStyle=C.paperInk; ctx.fillRect(30,93,12,2);
@@ -1081,6 +1947,7 @@ function drawHUD(){
 
   if(S.combo>1) label('COMBO x'+S.combo,DW/2,124,20,C.gold,'center','800');
 
+  drawTurnSign();
   drawAimGauges();
 
   if(S.calloutT>0){
@@ -1143,6 +2010,28 @@ function drawAimGauges(){
   });
 }
 
+/* Junction ahead: which way the road is about to swing. It is not an input
+   prompt — the bend is automatic — it is there so the lean is not a surprise. */
+function drawTurnSign(){
+  if(S.turnT<=0 || !S.turnSign) return;
+  var a = clamp(S.turnT/2.0, 0, 1);
+  var dir = S.turnSign, x = DW/2, y = 150;
+  ctx.globalAlpha = a * (0.65+0.35*(0.5+0.5*Math.sin(S.t*9)));
+  fillRR(x-58, y-24, 116, 44, 12, 'rgba(255,199,58,0.92)');
+  ctx.strokeStyle='rgba(40,30,0,0.55)'; ctx.lineWidth=2;
+  rr(x-58, y-24, 116, 44, 12); ctx.stroke();
+  ctx.strokeStyle='#231505'; ctx.lineWidth=6; ctx.lineCap='round'; ctx.lineJoin='round';
+  ctx.beginPath();
+  ctx.moveTo(x-dir*22, y+8); ctx.lineTo(x-dir*22, y-2);
+  ctx.quadraticCurveTo(x-dir*22, y-12, x-dir*8, y-12);
+  ctx.lineTo(x+dir*16, y-12);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x+dir*6, y-22); ctx.lineTo(x+dir*20, y-12); ctx.lineTo(x+dir*6, y-2);
+  ctx.stroke(); ctx.lineCap='butt';
+  ctx.globalAlpha = 1;
+}
+
 /* ---- render/screens.js ---- */
 // Full-screen overlays: title, street cleared, round over.
 
@@ -1196,33 +2085,69 @@ function drawOver(){
 }
 
 /* ---- render/scene.js ---- */
-// Composites one frame: background, depth-sorted world, effects, rider, then UI.
+// Composites one frame: background, depth-sorted world, effects, rider, UI.
+
+/* The visible list is rebuilt every frame; pooling the entries keeps that
+   from allocating a few hundred short-lived objects a second. */
+var pool = [], order = [], poolN = 0;
+function visPush(o, rel){
+  var e = pool[poolN];
+  if(!e){ e = { o:null, rel:0 }; pool[poolN] = e; }
+  poolN++;
+  e.o = o; e.rel = rel;
+  order.push(e);
+}
+function byDepth(a,b){ return b.rel-a.rel; }
+
+/* Scenery is drawn from the far cutoff inwards; the haze goes down once the
+   pass crosses this depth, so anything beyond it appears through mist instead
+   of popping into existence. */
+var HAZE_Z = 46;
 
 function render(){
   ctx.save();
-  if(S.shake>0) ctx.translate(rnd(-S.shake,S.shake)*.5, rnd(-S.shake,S.shake)*.35);
+
+  /* camera: shake, bob, a little lateral lag behind the rider, and roll */
+  var tx = 0, ty = S.camBob;
+  if(S.shake>0){ tx += rnd(-S.shake,S.shake)*.5; ty += rnd(-S.shake,S.shake)*.35; }
+  tx += (S.px - S.camX) * 26;
+  ctx.translate(tx, ty);
+  if(S.camRoll){
+    ctx.translate(DW/2, DH);
+    ctx.rotate(-S.camRoll*0.08);
+    ctx.translate(-DW/2, -DH);
+  }
 
   drawSky(); drawSkyline(); drawGround();
 
-  var vis=[],i;
+  poolN = 0; order.length = 0;
+  var i, o, rel;
   for(i=0;i<S.objs.length;i++){
-    var o=S.objs[i], rel=o.z-S.trackPos;
-    if(rel<1.3 || rel>72) continue;
+    o=S.objs[i]; rel=o.z-S.trackPos;
+    if(rel<1.3 || rel>Z_FAR) continue;
     if((o.kind==='obs' || o.kind==='pickup') && rel<2.1) continue;
     if(o.kind==='pickup' && o.taken) continue;
-    vis.push({o:o,rel:rel});
+    if(o.kind==='cross' && o.phase==='gone') continue;
+    visPush(o, rel);
   }
-  vis.sort(function(a,b){ return b.rel-a.rel; });
-  for(i=0;i<vis.length;i++){
-    var v=vis[i];
-    if(v.o.kind==='house') drawHouse(v.o,v.rel);
-    else if(v.o.kind==='prop') drawProp(v.o,v.rel);
-    else if(v.o.kind==='obs') drawObstacle(v.o,v.rel);
-    else if(v.o.kind==='pickup') drawPickup(v.o,v.rel);
-    else if(v.o.kind==='bunting') drawBunting(v.o,v.rel);
-  }
+  order.sort(byDepth);
 
-  for(i=0;i<S.dust.length;i++) drawDust(S.dust[i]);
+  var hazed = false;
+  for(i=0;i<order.length;i++){
+    var v = order[i];
+    if(!hazed && v.rel < HAZE_Z){ drawHaze(); hazed = true; }
+    var k = v.o.kind;
+    if(k==='house')         drawHouse(v.o, v.rel);
+    else if(k==='landmark') drawLandmark(v.o, v.rel);
+    else if(k==='prop')     drawProp(v.o, v.rel);
+    else if(k==='obs')      drawObstacle(v.o, v.rel);
+    else if(k==='cross')    drawCrossing(v.o, v.rel);
+    else if(k==='pickup')   drawPickup(v.o, v.rel);
+    else if(k==='bunting')  drawBunting(v.o, v.rel);
+  }
+  if(!hazed) drawHaze();
+
+  for(i=0;i<S.dust.length;i++){ if(S.dust[i].active) drawDust(S.dust[i]); }
 
   for(i=0;i<S.pops.length;i++){
     var pp=S.pops[i], rel2=pp.z-S.trackPos;
@@ -1252,6 +2177,7 @@ function render(){
    then run a fixed update/render loop off requestAnimationFrame. */
 
 
+initDust();
 buildLevel(1);
 attachInput();
 

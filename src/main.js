@@ -5,6 +5,7 @@
 
 import { S } from './game/state.js';
 import { buildLevel } from './game/level.js';
+import { initDust } from './game/particles.js';
 import { update } from './game/update.js';
 import { attachInput } from './game/input.js';
 import { startGame, nextStreet, press } from './game/flow.js';
@@ -12,6 +13,7 @@ import { toss, findTarget, landZ } from './game/throwing.js';
 import { setLane } from './game/actions.js';
 import { render } from './render/scene.js';
 
+initDust();
 buildLevel(1);
 attachInput();
 

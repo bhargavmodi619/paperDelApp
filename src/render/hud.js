@@ -5,11 +5,10 @@ import { rr, fillRR, circle, label } from '../core/draw.js';
 import { clamp } from '../core/math.js';
 import { S } from '../game/state.js';
 import { findTarget, landZ, HIT_TOL, PERFECT_TOL } from '../game/throwing.js';
+import { hudGradient } from './background.js';
 
 function drawHUD(){
-  var g=ctx.createLinearGradient(0,0,0,96);
-  g.addColorStop(0,'rgba(10,16,26,0.55)'); g.addColorStop(1,'rgba(10,16,26,0)');
-  ctx.fillStyle=g; ctx.fillRect(0,0,DW,96);
+  ctx.fillStyle=hudGradient(); ctx.fillRect(0,0,DW,96);
 
   label('LEVEL '+S.level,16,30,15,C.hudDim,'left','700');
   label(String(S.score),16,58,26,C.hud,'left','800');
@@ -25,6 +24,13 @@ function drawHUD(){
     ctx.fillStyle='#43535e'; rr(hx-9,hy-6,18,6,3); ctx.fill();
   }
 
+  var low = S.papers <= 2;
+  if(low){
+    var lp = .5+.5*Math.sin(S.t*8);
+    ctx.globalAlpha = .35+.45*lp;
+    fillRR(12,76,104,38,19,C.bad);
+    ctx.globalAlpha = 1;
+  }
   fillRR(16,80,96,30,15,'rgba(10,16,26,0.5)');
   fillRR(26,89,20,13,3,C.paper);
   ctx.fillStyle=C.paperInk; ctx.fillRect(30,93,12,2);
@@ -36,6 +42,7 @@ function drawHUD(){
 
   if(S.combo>1) label('COMBO x'+S.combo,DW/2,124,20,C.gold,'center','800');
 
+  drawTurnSign();
   drawAimGauges();
 
   if(S.calloutT>0){
@@ -96,6 +103,28 @@ function drawAimGauges(){
     ctx.stroke(); ctx.lineCap='butt';
     if(inZone) label('THROW', x, top+len+22, 13, C.good, 'center','800');
   });
+}
+
+/* Junction ahead: which way the road is about to swing. It is not an input
+   prompt — the bend is automatic — it is there so the lean is not a surprise. */
+function drawTurnSign(){
+  if(S.turnT<=0 || !S.turnSign) return;
+  var a = clamp(S.turnT/2.0, 0, 1);
+  var dir = S.turnSign, x = DW/2, y = 150;
+  ctx.globalAlpha = a * (0.65+0.35*(0.5+0.5*Math.sin(S.t*9)));
+  fillRR(x-58, y-24, 116, 44, 12, 'rgba(255,199,58,0.92)');
+  ctx.strokeStyle='rgba(40,30,0,0.55)'; ctx.lineWidth=2;
+  rr(x-58, y-24, 116, 44, 12); ctx.stroke();
+  ctx.strokeStyle='#231505'; ctx.lineWidth=6; ctx.lineCap='round'; ctx.lineJoin='round';
+  ctx.beginPath();
+  ctx.moveTo(x-dir*22, y+8); ctx.lineTo(x-dir*22, y-2);
+  ctx.quadraticCurveTo(x-dir*22, y-12, x-dir*8, y-12);
+  ctx.lineTo(x+dir*16, y-12);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x+dir*6, y-22); ctx.lineTo(x+dir*20, y-12); ctx.lineTo(x+dir*6, y-2);
+  ctx.stroke(); ctx.lineCap='butt';
+  ctx.globalAlpha = 1;
 }
 
 export { drawHUD, drawAimGauges };

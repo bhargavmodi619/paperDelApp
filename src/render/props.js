@@ -72,6 +72,10 @@ function drawProp(o,rel){
     circle(cx+sw*.30, y-p*.06, p*.06, '#6b5540');
     return;
   }
+  if(o.type==='hawker'){
+    drawHawker(o,cx,y,p);
+    return;
+  }
   if(o.type==='dog'){
     var trot = Math.sin(S.t*6+o.seed);
     var dw=0.42*p, dh=0.26*p, dy=y-dh;
@@ -86,6 +90,89 @@ function drawProp(o,rel){
     ctx.stroke(); ctx.lineCap='butt';
     return;
   }
+}
+
+/* ---- hawkers ---------------------------------------------------------------
+   The street is already awake: a sabziwala behind his cart, a fruit seller
+   with a head-load basket, the milkman with his cans, and someone selling
+   brooms. They sway and call out; none of them are in the road. */
+function drawHawker(o,cx,y,p){
+  var sway = Math.sin(S.t*1.8+o.seed)*p*.012;
+  var face = o.x>0 ? -1 : 1;                 // they face the road
+  var kurta = pick2(o.seed, ['#dcd3c0','#cfe0ea','#e6d2c2','#d4e0cf','#efe3c8']);
+  var hh = 0.92*p;                           // person height in pixels
+
+  if(o.hawker==='sabzi'){
+    /* handcart of vegetables */
+    var cw=p*.66, ch=p*.24, cy=y-ch-p*.08;
+    circle(cx-cw*.30, y-p*.07, p*.075, '#3a3a3a');
+    circle(cx+cw*.30, y-p*.07, p*.075, '#3a3a3a');
+    fillRR(cx-cw/2, cy, cw, ch, p*.02, '#a9713e');
+    var veg=['#4f8f3a','#e2483d','#6cbf46','#f0a92a','#8e5fb0','#4f8f3a'];
+    for(var i=0;i<6;i++) circle(cx-cw*.36+i*cw*.145, cy-p*.03, p*.045, veg[i]);
+    person(cx-cw*.62, y, hh, kurta, face, sway, o.seed);
+    return;
+  }
+  if(o.hawker==='fruit'){
+    /* basket carried on the head */
+    person(cx, y, hh, kurta, face, sway, o.seed);
+    var by=y-hh-p*.05;
+    fillRR(cx-p*.17+sway, by-p*.09, p*.34, p*.10, p*.02, '#c8a262');
+    circle(cx-p*.08+sway, by-p*.11, p*.045, '#f0a92a');
+    circle(cx+p*.02+sway, by-p*.12, p*.045, '#e2483d');
+    circle(cx+p*.10+sway, by-p*.10, p*.040, '#6cbf46');
+    return;
+  }
+  if(o.hawker==='milk'){
+    /* cycle with milk cans slung either side */
+    var wr=p*.10;
+    circle(cx-p*.24, y-wr, wr, '#2b2b2b');
+    circle(cx+p*.24, y-wr, wr, '#2b2b2b');
+    ctx.strokeStyle='#5a6b7a'; ctx.lineWidth=Math.max(1.5,p*.018);
+    ctx.beginPath();
+    ctx.moveTo(cx-p*.24,y-wr); ctx.lineTo(cx,y-p*.30); ctx.lineTo(cx+p*.24,y-wr);
+    ctx.moveTo(cx,y-p*.30); ctx.lineTo(cx-p*.04,y-p*.52);
+    ctx.stroke();
+    fillRR(cx-p*.30, y-p*.34, p*.15, p*.22, p*.02, '#b9c3c8');
+    fillRR(cx+p*.16, y-p*.34, p*.15, p*.22, p*.02, '#b9c3c8');
+    person(cx-p*.02, y, hh*.92, kurta, face, sway, o.seed);
+    return;
+  }
+  /* broom seller: a bundle over the shoulder */
+  person(cx, y, hh, kurta, face, sway, o.seed);
+  ctx.strokeStyle='#b08040'; ctx.lineWidth=Math.max(1.5,p*.016);
+  ctx.beginPath();
+  ctx.moveTo(cx-p*.20+sway, y-hh*.52); ctx.lineTo(cx+p*.24+sway, y-hh*.86);
+  ctx.stroke();
+  ctx.strokeStyle='#d8c489'; ctx.lineWidth=Math.max(1,p*.010);
+  for(var b=0;b<5;b++){
+    ctx.beginPath();
+    ctx.moveTo(cx+p*.22+sway, y-hh*.84);
+    ctx.lineTo(cx+p*.34+sway+b*p*.012, y-hh*.96-b*p*.008);
+    ctx.stroke();
+  }
+}
+
+/* A single flat-vector figure — head, torso, legs. Deliberately simple: at
+   this scale anything more reads as noise. */
+function person(x, ground, h, kurta, face, sway, seed){
+  var skin='#c98a5e';
+  /* legs */
+  ctx.fillStyle='#6f7a86';
+  ctx.fillRect(x-h*.10, ground-h*.42, h*.08, h*.42);
+  ctx.fillRect(x+h*.02, ground-h*.42, h*.08, h*.42);
+  /* torso */
+  fillRR(x-h*.15+sway, ground-h*.80, h*.30, h*.42, h*.06, kurta);
+  /* arm nearest the road */
+  ctx.strokeStyle=skin; ctx.lineWidth=Math.max(1.5,h*.07); ctx.lineCap='round';
+  ctx.beginPath();
+  ctx.moveTo(x+face*h*.12+sway, ground-h*.72);
+  ctx.lineTo(x+face*h*.22+sway, ground-h*.50+Math.sin(seed+ground*0.01)*h*.03);
+  ctx.stroke(); ctx.lineCap='butt';
+  /* head */
+  circle(x+sway, ground-h*.90, h*.11, skin);
+  ctx.fillStyle='#2a2320';
+  ctx.beginPath(); ctx.arc(x+sway, ground-h*.93, h*.11, Math.PI, 0); ctx.fill();
 }
 
 /* bunting strung across the street */

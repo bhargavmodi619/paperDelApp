@@ -1,6 +1,7 @@
 // Player actions and their consequences.
 import { S } from './state.js';
 import { clamp, rnd } from '../core/math.js';
+import { spawnDust } from './particles.js';
 import { C } from '../core/palette.js';
 import { blip } from '../core/audio.js';
 import { callout } from './throwing.js';
@@ -15,7 +16,7 @@ function crash(){
   S.lives--; S.combo=0; S.stun=1.2; S.shake=16;
   callout('CRASH!', C.bad);
   blip(85,.32,'sawtooth');
-  for(var i=0;i<14;i++) S.dust.push({ x:S.px+rnd(-.5,.5), z:S.trackPos+rnd(2.5,5), t:1, r:rnd(0.10,0.22) });
+  for(var i=0;i<14;i++) spawnDust(S.px+rnd(-.5,.5), S.trackPos+rnd(2.5,5), rnd(0.10,0.22));
   if(S.lives<=0){ S.mode='over'; if(S.score>S.best) S.best=S.score; }
 }
 

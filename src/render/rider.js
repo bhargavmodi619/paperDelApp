@@ -5,12 +5,19 @@ import { fillRR, circle } from '../core/draw.js';
 import { clamp } from '../core/math.js';
 import { S } from '../game/state.js';
 
+/* How much of the screen the scooter is allowed to take. claude.md section 3
+   wants the basket under a quarter of the visible height; at 0.80 the whole
+   assembly tops out around 165px of 700, which also makes the view read as
+   what it is — first person, over the handlebar. */
+var RIDER_K = 0.80;
+
 function drawRider(){
   var lean=clamp(S.lean,-.9,.9);
   var wob=Math.sin(S.t*10)*1.2 + (S.stun>0?Math.sin(S.t*40)*7:0);
   ctx.save();
   ctx.translate(DW/2 + lean*34 + wob, DH);
   ctx.rotate(lean*0.05);
+  ctx.scale(RIDER_K, RIDER_K);
 
   ctx.globalAlpha=.22;
   ctx.beginPath(); ctx.ellipse(0,-4,124,22,0,0,6.2832); ctx.fillStyle='#000'; ctx.fill();
@@ -29,7 +36,7 @@ function drawRider(){
   circle(0,-78,9,'#22303d'); circle(0,-78,5,'#8fa3b3');
 
   /* basket of papers */
-  var bw=136, bh=58, by=-198;
+  var bw=132, bh=50, by=-188;
   var stack = clamp(Math.ceil(S.papers/3),0,6);
   for(var i=0;i<stack;i++){
     var spread = stack>1 ? (bw*0.66/(stack-1)) : 0;
@@ -88,8 +95,8 @@ function drawArm(side, t){
   ctx.lineCap='butt';
   /* fist */
   ctx.save(); ctx.translate(x,y); ctx.rotate(side*(0.12+swing*0.7));
-  fillRR(-19,-15,38,27,12,'#c98a5e');
-  ctx.fillStyle='rgba(0,0,0,0.10)'; ctx.fillRect(-19,-2,38,4);
+  fillRR(-22,-17,44,31,13,'#c98a5e');
+  ctx.fillStyle='rgba(0,0,0,0.10)'; ctx.fillRect(-22,-3,44,5);
   ctx.restore();
 }
 function mirror(x,y,dir){
